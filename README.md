@@ -2,6 +2,8 @@
 
 A GUI tool for extracting metadata from Unity IL2CPP games.
 
+![Injector GUI](imgs/img1.png)
+
 ## Features
 
 - **GUI Interface** - Simple button-click dumping
