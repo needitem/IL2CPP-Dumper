@@ -1,0 +1,20 @@
+# Windows special files
+nul
+
+# Build outputs
+bin/
+obj/
+Dump/bin/
+Dump/obj/
+Injector/bin/
+Injector/obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.pdb
+
+# Temp
+*.tmp
+*.log
