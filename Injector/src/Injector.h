@@ -28,4 +28,5 @@ namespace Injector {
         bool clearHeader = true, bool clearNonNeeded = true, bool adjustProtections = true, bool sehSupport = true);
     bool ManualMap(HANDLE hProc, BYTE* pSrcData, SIZE_T fileSize, std::string& error,
         bool clearHeader = true, bool clearNonNeeded = true, bool adjustProtections = true, bool sehSupport = true);
+    bool LoadLibraryInject(HANDLE hProc, const std::string& dllPath, std::string& error);
 }

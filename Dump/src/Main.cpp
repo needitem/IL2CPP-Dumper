@@ -7,6 +7,7 @@
 #include <Uxtheme.h>
 #include "../include/Resource.h"
 #include "../include/Dumper.h"
+#include "../include/Utils.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
@@ -132,8 +133,10 @@ void OnStart() {
 }
 
 void OnOpenFolder() {
+    std::string baseDir = Utils::GetGameDir();
     bool human = SendMessage(hRadio[0], BM_GETCHECK, 0, 0) == BST_CHECKED;
-    ShellExecuteA(nullptr, "explore", human ? "C:\\IL2CPP_Dump" : "C:\\IL2CPP_Dump_JSON", nullptr, nullptr, SW_SHOW);
+    std::string folder = baseDir + (human ? "IL2CPP_Dump" : "IL2CPP_Dump_JSON");
+    ShellExecuteA(nullptr, "explore", folder.c_str(), nullptr, nullptr, SW_SHOW);
 }
 
 // Custom dark controls

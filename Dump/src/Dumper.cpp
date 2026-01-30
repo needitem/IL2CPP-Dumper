@@ -102,18 +102,19 @@ void Dumper::ExportAssembly(const IL2CPP_Image& img, OutputFormat format) {
     std::replace(safeName.begin(), safeName.end(), '.', '_');
     std::replace(safeName.begin(), safeName.end(), '-', '_');
 
+    std::string baseDir = Utils::GetGameDir();
     std::string folder, ext;
     switch (format) {
         case OutputFormat::CSharp:
-            folder = "C:\\IL2CPP_Dump\\";
+            folder = baseDir + "IL2CPP_Dump\\";
             ext = ".cs";
             break;
         case OutputFormat::JsonFull:
-            folder = "C:\\IL2CPP_Dump_JSON\\";
+            folder = baseDir + "IL2CPP_Dump_JSON\\";
             ext = ".json";
             break;
         case OutputFormat::JsonSummary:
-            folder = "C:\\IL2CPP_Dump_Summary\\";
+            folder = baseDir + "IL2CPP_Dump_Summary\\";
             ext = ".json";
             break;
     }
@@ -270,19 +271,21 @@ void Dumper::ExportAssembly(const IL2CPP_Image& img, OutputFormat format) {
 }
 
 void Dumper::ExportHuman() {
-    Utils::CreateDir("C:\\IL2CPP_Dump");
+    std::string baseDir = Utils::GetGameDir();
+    Utils::CreateDir(baseDir + "IL2CPP_Dump");
     int total = (int)images.size();
     for (int i = 0; i < total; i++) {
         Progress(i + 1, total, images[i].GetName());
         Log("Exporting: " + images[i].GetName());
         ExportAssembly(images[i], OutputFormat::CSharp);
     }
-    Log("\nOutput: C:\\IL2CPP_Dump\\");
+    Log("\nOutput: " + baseDir + "IL2CPP_Dump\\");
 }
 
 void Dumper::ExportAI() {
-    Utils::CreateDir("C:\\IL2CPP_Dump_JSON");
-    Utils::CreateDir("C:\\IL2CPP_Dump_Summary");
+    std::string baseDir = Utils::GetGameDir();
+    Utils::CreateDir(baseDir + "IL2CPP_Dump_JSON");
+    Utils::CreateDir(baseDir + "IL2CPP_Dump_Summary");
 
     std::vector<IL2CPP_Image*> filtered;
     for (auto& img : images) {
@@ -298,13 +301,14 @@ void Dumper::ExportAI() {
         ExportAssembly(*filtered[i], OutputFormat::JsonFull);
         ExportAssembly(*filtered[i], OutputFormat::JsonSummary);
     }
-    Log("\nOutput: C:\\IL2CPP_Dump_JSON\\ + C:\\IL2CPP_Dump_Summary\\");
+    Log("\nOutput: " + baseDir + "IL2CPP_Dump_JSON\\ + " + baseDir + "IL2CPP_Dump_Summary\\");
 }
 
 void Dumper::ExportCustom(bool cs, bool json, bool summary) {
-    if (cs) Utils::CreateDir("C:\\IL2CPP_Dump");
-    if (json) Utils::CreateDir("C:\\IL2CPP_Dump_JSON");
-    if (summary) Utils::CreateDir("C:\\IL2CPP_Dump_Summary");
+    std::string baseDir = Utils::GetGameDir();
+    if (cs) Utils::CreateDir(baseDir + "IL2CPP_Dump");
+    if (json) Utils::CreateDir(baseDir + "IL2CPP_Dump_JSON");
+    if (summary) Utils::CreateDir(baseDir + "IL2CPP_Dump_Summary");
 
     std::vector<IL2CPP_Image*> filtered;
     for (auto& img : images) {

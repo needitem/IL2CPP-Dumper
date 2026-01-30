@@ -318,4 +318,69 @@ bool ManualMap(HANDLE hProc, BYTE* pSrcData, SIZE_T fileSize, std::string& error
     return true;
 }
 
+bool LoadLibraryInject(HANDLE hProc, const std::string& dllPath, std::string& error) {
+    // Get full path
+    char fullPath[MAX_PATH];
+    if (!GetFullPathNameA(dllPath.c_str(), MAX_PATH, fullPath, nullptr)) {
+        error = "GetFullPathName failed: " + std::to_string(GetLastError());
+        return false;
+    }
+
+    SIZE_T pathLen = strlen(fullPath) + 1;
+
+    // Allocate memory for DLL path string in target process
+    void* pRemotePath = VirtualAllocEx(hProc, nullptr, pathLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pRemotePath) {
+        error = "VirtualAllocEx failed: " + std::to_string(GetLastError());
+        return false;
+    }
+
+    // Write DLL path to target process
+    if (!WriteProcessMemory(hProc, pRemotePath, fullPath, pathLen, nullptr)) {
+        error = "WriteProcessMemory failed: " + std::to_string(GetLastError());
+        VirtualFreeEx(hProc, pRemotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Get LoadLibraryA address
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (!hKernel32) {
+        error = "GetModuleHandle(kernel32) failed";
+        VirtualFreeEx(hProc, pRemotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    auto pLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryA");
+    if (!pLoadLibrary) {
+        error = "GetProcAddress(LoadLibraryA) failed";
+        VirtualFreeEx(hProc, pRemotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Create remote thread to call LoadLibraryA
+    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(pLoadLibrary), pRemotePath, 0, nullptr);
+    if (!hThread) {
+        error = "CreateRemoteThread failed: " + std::to_string(GetLastError());
+        VirtualFreeEx(hProc, pRemotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Wait for completion
+    WaitForSingleObject(hThread, 10000);
+
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+    CloseHandle(hThread);
+
+    VirtualFreeEx(hProc, pRemotePath, 0, MEM_RELEASE);
+
+    if (exitCode == 0) {
+        error = "LoadLibraryA returned NULL (DLL load failed in target)";
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace Injector

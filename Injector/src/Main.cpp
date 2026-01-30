@@ -22,7 +22,7 @@
 
 // Window
 #define WIN_W 520
-#define WIN_H 520
+#define WIN_H 560
 
 // Control IDs
 #define IDC_LIST          1001
@@ -34,6 +34,8 @@
 #define IDC_EDIT_EXE      1007
 #define IDC_BTN_BROWSE_EXE 1008
 #define IDC_BTN_LAUNCH    1009
+#define IDC_RADIO_MMAP    1010
+#define IDC_RADIO_LOADLIB 1011
 
 struct ProcessInfo {
     DWORD pid;
@@ -46,6 +48,25 @@ static HWND hWnd, hList, hEditDll, hEditExe, hStatus;
 static std::vector<ProcessInfo> processes;
 static std::string dllPath;
 static std::string exePath;
+
+bool EnableDebugPrivilege() {
+    HANDLE hToken;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+        return false;
+
+    TOKEN_PRIVILEGES tp;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    if (!LookupPrivilegeValueA(nullptr, "SeDebugPrivilege", &tp.Privileges[0].Luid)) {
+        CloseHandle(hToken);
+        return false;
+    }
+
+    BOOL result = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    CloseHandle(hToken);
+    return result && GetLastError() == ERROR_SUCCESS;
+}
 
 bool IsRunAsAdmin() {
     BOOL isAdmin = FALSE;
@@ -179,6 +200,108 @@ void BrowseExe() {
     }
 }
 
+void WriteOutputConfig(HANDLE hProcess) {
+    // Write injector's directory as output path to game directory
+    char injectorPath[MAX_PATH];
+    GetModuleFileNameA(nullptr, injectorPath, MAX_PATH);
+    std::string injDir(injectorPath);
+    size_t pos = injDir.find_last_of("\\/");
+    if (pos != std::string::npos) injDir = injDir.substr(0, pos);
+
+    // Get game exe path
+    char gameExePath[MAX_PATH] = {};
+    GetModuleFileNameExA(hProcess, nullptr, gameExePath, MAX_PATH);
+    std::string gameDir(gameExePath);
+    pos = gameDir.find_last_of("\\/");
+    if (pos != std::string::npos) gameDir = gameDir.substr(0, pos + 1);
+
+    std::string cfgPath = gameDir + "IL2CPP_Dumper.cfg";
+    HANDLE hFile = CreateFileA(cfgPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(hFile, injDir.c_str(), (DWORD)injDir.size(), &written, nullptr);
+        CloseHandle(hFile);
+    }
+}
+
+bool IsSteamGame(const std::string& gameExeDir) {
+    std::string appidFile = gameExeDir + "\\steam_appid.txt";
+    if (GetFileAttributesA(appidFile.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+    // Check for steam_api64.dll or steam_api.dll in game directory
+    std::string steamApi64 = gameExeDir + "\\steam_api64.dll";
+    std::string steamApi32 = gameExeDir + "\\steam_api.dll";
+    if (GetFileAttributesA(steamApi64.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+    if (GetFileAttributesA(steamApi32.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+    return false;
+}
+
+// Collect all PIDs that have GameAssembly.dll loaded
+std::vector<DWORD> FindAllIL2CPPPids() {
+    std::vector<DWORD> pids;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return pids;
+
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
+            if (hProc) {
+                HMODULE hMods[1024];
+                DWORD cbNeeded;
+                if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded)) {
+                    for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
+                        char modName[MAX_PATH];
+                        if (GetModuleBaseNameA(hProc, hMods[i], modName, sizeof(modName))) {
+                            if (_stricmp(modName, "GameAssembly.dll") == 0) {
+                                pids.push_back(pe.th32ProcessID);
+                                break;
+                            }
+                        }
+                    }
+                }
+                CloseHandle(hProc);
+            }
+        } while (Process32NextW(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+    return pids;
+}
+
+// Find a NEW IL2CPP process that wasn't in the exclude list
+DWORD FindNewIL2CPPProcess(const std::vector<DWORD>& excludePids) {
+    auto allPids = FindAllIL2CPPPids();
+    for (DWORD pid : allPids) {
+        bool excluded = false;
+        for (DWORD ex : excludePids) {
+            if (pid == ex) { excluded = true; break; }
+        }
+        if (!excluded) return pid;
+    }
+    return 0;
+}
+
+bool InjectWithSelectedMethod(HANDLE hProcess, const char* dllFile, std::string& error) {
+    bool useMMap = (IsDlgButtonChecked(hWnd, IDC_RADIO_MMAP) == BST_CHECKED);
+    if (useMMap) {
+        bool success = Injector::ManualMap(hProcess, dllFile, error);
+        if (!success) {
+            // Fallback to LoadLibrary
+            std::string mmError = error;
+            error.clear();
+            success = Injector::LoadLibraryInject(hProcess, dllFile, error);
+            if (!success) {
+                error = "ManualMap: " + mmError + "\nLoadLibrary: " + error;
+            }
+        }
+        return success;
+    } else {
+        return Injector::LoadLibraryInject(hProcess, dllFile, error);
+    }
+}
+
 void DoInject() {
     int sel = (int)SendMessage(hList, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR || sel >= (int)processes.size()) {
@@ -206,14 +329,17 @@ void DoInject() {
         return;
     }
 
+    WriteOutputConfig(hProcess);
+
     std::string error;
-    if (Injector::ManualMap(hProcess, path, error)) {
-        CloseHandle(hProcess);
+    bool success = InjectWithSelectedMethod(hProcess, path, error);
+    CloseHandle(hProcess);
+
+    if (success) {
         Status("Injection successful!");
         MessageBoxA(hWnd, "DLL injected successfully!\n\nThe IL2CPP Dumper GUI should appear in the game.",
             "Success", MB_OK | MB_ICONINFORMATION);
     } else {
-        CloseHandle(hProcess);
         Status(("Failed: " + error).c_str());
         MessageBoxA(hWnd, ("Injection failed:\n" + error).c_str(), "Error", MB_OK | MB_ICONERROR);
     }
@@ -246,75 +372,46 @@ void DoLaunchAndInject() {
         workDir = workDir.substr(0, pos);
     }
 
+    // Launch game normally via ShellExecute
     Status("Launching game...");
+    ShellExecuteA(nullptr, "open", gameExe, nullptr, workDir.c_str(), SW_SHOW);
 
-    // Create process suspended
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {0};
+    // Poll for IL2CPP process and retry injection (up to 90 seconds)
+    // Steam may kill the first process and relaunch - keep trying
+    std::string lastError;
+    for (int attempt = 1; attempt <= 30; attempt++) {
+        char statusBuf[80];
+        sprintf_s(statusBuf, "Waiting for game... (%d/30)", attempt);
+        Status(statusBuf);
+        Sleep(3000);
 
-    if (!CreateProcessA(gameExe, nullptr, nullptr, nullptr, FALSE,
-        CREATE_SUSPENDED, nullptr, workDir.c_str(), &si, &pi)) {
-        Status("Failed to launch game");
-        return;
-    }
+        RefreshProcessList();
+        if (processes.empty()) continue; // process not (yet) found, keep waiting
 
-    // Resume and wait for GameAssembly.dll to load
-    ResumeThread(pi.hThread);
-    Status("Waiting for game to load...");
+        SendMessage(hList, LB_SETCURSEL, 0, 0);
 
-    bool found = false;
-    for (int i = 0; i < 300; i++) { // 30 seconds timeout
-        Sleep(100);
+        HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processes[0].pid);
+        if (!hProcess) continue;
 
-        HMODULE hMods[1024];
-        DWORD cbNeeded;
-        if (EnumProcessModules(pi.hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-            for (DWORD j = 0; j < (cbNeeded / sizeof(HMODULE)); j++) {
-                char modName[MAX_PATH];
-                if (GetModuleBaseNameA(pi.hProcess, hMods[j], modName, sizeof(modName))) {
-                    if (_stricmp(modName, "GameAssembly.dll") == 0) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if (found) break;
+        WriteOutputConfig(hProcess);
 
-        // Check if process still alive
-        DWORD exitCode;
-        if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
-            Status("Game exited unexpectedly");
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
+        lastError.clear();
+        bool success = InjectWithSelectedMethod(hProcess, dllFile, lastError);
+        CloseHandle(hProcess);
+
+        if (success) {
+            Status("Injection successful!");
+            MessageBoxA(hWnd, "Game launched and DLL injected!\n\nThe IL2CPP Dumper GUI should appear in the game.",
+                "Success", MB_OK | MB_ICONINFORMATION);
             return;
         }
+        // Injection failed - maybe wrong process or not ready yet, keep trying
     }
 
-    if (!found) {
-        Status("Timeout: GameAssembly.dll not found. Is this an IL2CPP game?");
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return;
-    }
-
-    // Wait a bit more for full initialization
-    Sleep(2000);
-
-    Status("Injecting...");
-
-    std::string error;
-    if (Injector::ManualMap(pi.hProcess, dllFile, error)) {
-        Status("Injection successful!");
-        MessageBoxA(hWnd, "Game launched and DLL injected!\n\nThe IL2CPP Dumper GUI should appear in the game.",
-            "Success", MB_OK | MB_ICONINFORMATION);
-    } else {
-        Status(("Injection failed: " + error).c_str());
-        MessageBoxA(hWnd, ("Injection failed:\n" + error).c_str(), "Error", MB_OK | MB_ICONERROR);
-    }
-
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    Status(("Injection failed: " + lastError).c_str());
+    MessageBoxA(hWnd,
+        ("Injection failed after 30 attempts:\n" + lastError + "\n\nTry manual 'Refresh -> Inject' instead.").c_str(),
+        "Error", MB_OK | MB_ICONERROR);
 }
 
 void BuildUI(HWND parent) {
@@ -405,7 +502,26 @@ void BuildUI(HWND parent) {
     HWND hBtnBrowse = CreateWindowA("BUTTON", "Browse...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         m + w - 80, y, 80, 26, parent, (HMENU)IDC_BTN_BROWSE, nullptr, nullptr);
     SendMessage(hBtnBrowse, WM_SETFONT, (WPARAM)hFontUI, TRUE);
-    y += 40;
+    y += 35;
+
+    // === Section: Injection Method ===
+    HWND hLblMethod = CreateWindowA("STATIC", "Injection Method:", WS_CHILD | WS_VISIBLE,
+        m, y, 130, 20, parent, nullptr, nullptr, nullptr);
+    SendMessage(hLblMethod, WM_SETFONT, (WPARAM)hFontBold, TRUE);
+
+    HWND hRadioMMap = CreateWindowA("BUTTON", "ManualMap (Stealth)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+        m + 135, y, 170, 20, parent, (HMENU)IDC_RADIO_MMAP, nullptr, nullptr);
+    SendMessage(hRadioMMap, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+    HWND hRadioLoadLib = CreateWindowA("BUTTON", "LoadLibrary (Compatible)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        m + 310, y, 180, 20, parent, (HMENU)IDC_RADIO_LOADLIB, nullptr, nullptr);
+    SendMessage(hRadioLoadLib, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+    // Default to ManualMap
+    CheckRadioButton(parent, IDC_RADIO_MMAP, IDC_RADIO_LOADLIB, IDC_RADIO_MMAP);
+    y += 30;
 
     // Status
     hStatus = CreateWindowA("STATIC", "Select game EXE or click Refresh", WS_CHILD | WS_VISIBLE | SS_CENTER,
@@ -481,6 +597,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         }
         return 0;
     }
+
+    EnableDebugPrivilege();
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
