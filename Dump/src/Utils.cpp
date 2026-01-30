@@ -4,6 +4,12 @@
 namespace Utils {
 
 std::string GetGameDir() {
+    static std::string cachedDir;
+    static bool initialized = false;
+
+    if (initialized) return cachedDir;
+    initialized = true;
+
     // Read output path from config file in game directory
     char buf[MAX_PATH];
     GetModuleFileNameA(nullptr, buf, MAX_PATH);
@@ -18,19 +24,19 @@ std::string GetGameDir() {
         DWORD bytesRead = 0;
         ReadFile(hFile, outBuf, MAX_PATH - 1, &bytesRead, nullptr);
         CloseHandle(hFile);
-        // Clean up whitespace
         std::string result(outBuf, bytesRead);
         while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
             result.pop_back();
         if (!result.empty()) {
             if (result.back() != '\\' && result.back() != '/')
                 result += '\\';
-            // Delete config file after reading
             DeleteFileA(cfgPath.c_str());
-            return result;
+            cachedDir = result;
+            return cachedDir;
         }
     }
-    return gameDir;
+    cachedDir = gameDir;
+    return cachedDir;
 }
 
 void CreateDir(const std::string& path) {
