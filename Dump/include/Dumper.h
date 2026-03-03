@@ -40,8 +40,9 @@ public:
     void ExportHuman();
     void ExportAI();
     void ExportCustom(bool cs, bool json, bool summary);
-    std::vector<std::string> ScanMonoAssemblies(); // 이름 목록만 반환 (덤프 없음)
-    void ExportMono(const std::vector<std::string>& include = {}); // include가 비면 전체 덤프
+    std::vector<std::string> ScanMonoAssemblies();
+    void ExportMono(const std::vector<std::string>& include = {});
+    void ExportMonoFromMemory(); // Mono API 없을 때 메모리 스캔으로 .NET 어셈블리 덤프
 
 private:
     LogFunc logCallback;

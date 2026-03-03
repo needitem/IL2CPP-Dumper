@@ -141,7 +141,10 @@ void OnOpenFolder() {
     std::string baseDir = Utils::GetGameDir();
     std::string folder;
     if (g_LastWasMono) {
-        folder = baseDir + "Mono_Dump_JSON";
+        // Mono_Dump_Raw (memory scan fallback) 우선, 없으면 Mono_Dump_JSON
+        std::string raw = baseDir + "Mono_Dump_Raw";
+        std::string json = baseDir + "Mono_Dump_JSON";
+        folder = (GetFileAttributesA(raw.c_str()) != INVALID_FILE_ATTRIBUTES) ? raw : json;
     } else {
         bool human = SendMessage(hRadio[0], BM_GETCHECK, 0, 0) == BST_CHECKED;
         folder = baseDir + (human ? "IL2CPP_Dump" : "IL2CPP_Dump_JSON");

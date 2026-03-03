@@ -378,12 +378,95 @@ std::vector<std::string> Dumper::ScanMonoAssemblies() {
     return names;
 }
 
+void Dumper::ExportMonoFromMemory() {
+    std::string baseDir = Utils::GetGameDir();
+    std::string outDir  = baseDir + "Mono_Dump_Raw\\";
+    Utils::CreateDir(outDir);
+
+    Log("Scanning process memory for .NET assemblies...");
+    Log("(looking for MZ+PE+CLR headers in private/mapped memory)");
+
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+
+    int scanned = 0, found = 0;
+    auto* addr    = (uint8_t*)si.lpMinimumApplicationAddress;
+    auto* maxAddr = (uint8_t*)si.lpMaximumApplicationAddress;
+
+    while (addr < maxAddr) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+        addr = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+
+        if (mbi.State  != MEM_COMMIT) continue;
+        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) continue;
+        // MEM_IMAGE = 정상 로드된 DLL → 건너뜀, MEM_PRIVATE/MEM_MAPPED = 인메모리 로드
+        if (mbi.Type == MEM_IMAGE) continue;
+        if (mbi.RegionSize < 0x200) continue;
+
+        auto* base = (uint8_t*)mbi.BaseAddress;
+        size_t size = mbi.RegionSize;
+
+        // 4KB 단위로 MZ 헤더 탐색
+        for (size_t off = 0; off + 0x100 <= size; off += 0x1000) {
+            uint8_t* p = base + off;
+            if (p[0] != 'M' || p[1] != 'Z') continue;
+
+            // PE 오프셋 검증
+            DWORD peOff = *(DWORD*)(p + 0x3C);
+            if (peOff < 0x40 || off + peOff + 0x18 > size) continue;
+            if (*(DWORD*)(p + peOff) != 0x00004550) continue; // "PE\0\0"
+
+            // Optional header magic
+            WORD magic = *(WORD*)(p + peOff + 0x18);
+            if (magic != 0x010B && magic != 0x020B) continue;
+
+            // DataDirectory[14] = COM Descriptor (.NET header)
+            int ddOff = (magic == 0x020B) ? (0x18 + 0x70) : (0x18 + 0x60);
+            if (off + peOff + ddOff + 14 * 8 + 4 > size) continue;
+            DWORD clrRva = *(DWORD*)(p + peOff + ddOff + 14 * 8);
+            if (clrRva == 0) continue; // native PE, .NET 아님
+
+            // .NET 어셈블리 발견
+            scanned++;
+            DWORD imgSize = *(DWORD*)(p + peOff + 0x18 + 0x38); // SizeOfImage
+            if (imgSize == 0 || imgSize > 64 * 1024 * 1024) imgSize = (DWORD)(size - off);
+            if (off + imgSize > size) imgSize = (DWORD)(size - off);
+
+            char fname[64];
+            sprintf_s(fname, "mem_%016llX.dll", (unsigned long long)(uintptr_t)p);
+            std::ofstream f(outDir + fname, std::ios::binary);
+            if (f.is_open()) {
+                f.write((char*)p, imgSize);
+                f.close();
+                found++;
+                char msg[128];
+                sprintf_s(msg, "  [+] %s  (%u KB)", fname, imgSize / 1024);
+                Log(msg);
+                Progress(found, found + 5, fname);
+            }
+            off += 0xFFF; // 이 영역은 건너뜀 (다음 4KB로)
+        }
+    }
+
+    char buf[256];
+    sprintf_s(buf, "\n[+] Found %d .NET assemblies in memory", found);
+    Log(buf);
+    if (found > 0) {
+        Log("Output: " + outDir);
+        Log("Tip: Open .dll files with dnSpy or ILSpy to view contents");
+    } else {
+        Log("[!] None found - game may not have loaded assemblies yet");
+        Log("    Try: enter game world -> fishing area -> then dump");
+    }
+}
+
 void Dumper::ExportMono(const std::vector<std::string>& include) {
     if (!Mono::Initialize()) {
-        Log("[!] Mono API unavailable - no module exports mono_get_root_domain");
-        const std::string& diag = Mono::GetDiagLog();
-        if (!diag.empty()) Log(diag);
-        Log("    -> Enter game world fully, then retry");
+        Log("[!] Mono API unavailable (no mono_get_root_domain export found)");
+        Log("[*] Falling back to memory scan...");
+        Log("");
+        ExportMonoFromMemory();
         return;
     }
     Log("[+] Mono API initialized");
