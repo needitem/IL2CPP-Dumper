@@ -16,6 +16,10 @@
 
 #define IDC_BTN_START           401
 #define IDC_BTN_FOLDER          402
+#define IDC_BTN_MONO            403
+#define IDC_BTN_SCAN_MONO       404
+
+#define IDC_EDIT_MONO_FILTER    601
 
 #define IDC_PROGRESS            501
 #define IDC_STATUS              502

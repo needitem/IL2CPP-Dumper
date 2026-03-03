@@ -27,7 +27,7 @@
 
 // Window
 #define WIN_W 520
-#define WIN_H 620
+#define WIN_H 700
 
 // Brushes
 static HBRUSH hBrushBg, hBrushCard, hBrushBtn;
@@ -38,10 +38,12 @@ static HWND hWnd;
 static HWND hRadio[3];
 static HWND hChkFilter[4];
 static HWND hChkOutput[3];
-static HWND hBtnStart, hBtnFolder;
+static HWND hBtnStart, hBtnFolder, hBtnMono, hBtnScanMono;
+static HWND hEditMonoFilter;
 static HWND hProgress, hStatus, hLog;
 static HWND hLblCount;
 static bool isDumping = false;
+static bool g_LastWasMono = false;
 
 void Log(const std::string& text) {
     SendMessageA(hLog, EM_SETSEL, -1, -1);
@@ -68,11 +70,14 @@ void RefreshUI() {
     for (int i = 0; i < 4; i++) EnableWindow(hChkFilter[i], !human);
     for (int i = 0; i < 3; i++) EnableWindow(hChkOutput[i], custom);
     EnableWindow(hBtnStart, !isDumping);
+    EnableWindow(hBtnMono, !isDumping);
+    EnableWindow(hBtnScanMono, !isDumping);
 }
 
 void OnStart() {
     if (isDumping) return;
     isDumping = true;
+    g_LastWasMono = false;
     RefreshUI();
     SetWindowTextA(hBtnStart, "  Exporting...");
     SendMessage(hLog, WM_SETTEXT, 0, (LPARAM)"");
@@ -134,9 +139,114 @@ void OnStart() {
 
 void OnOpenFolder() {
     std::string baseDir = Utils::GetGameDir();
-    bool human = SendMessage(hRadio[0], BM_GETCHECK, 0, 0) == BST_CHECKED;
-    std::string folder = baseDir + (human ? "IL2CPP_Dump" : "IL2CPP_Dump_JSON");
+    std::string folder;
+    if (g_LastWasMono) {
+        folder = baseDir + "Mono_Dump_JSON";
+    } else {
+        bool human = SendMessage(hRadio[0], BM_GETCHECK, 0, 0) == BST_CHECKED;
+        folder = baseDir + (human ? "IL2CPP_Dump" : "IL2CPP_Dump_JSON");
+    }
     ShellExecuteA(nullptr, "explore", folder.c_str(), nullptr, nullptr, SW_SHOW);
+}
+
+// 필터 텍스트박스에서 쉼표 구분 키워드 파싱
+static std::vector<std::string> ParseFilter() {
+    char buf[512] = {};
+    GetWindowTextA(hEditMonoFilter, buf, sizeof(buf));
+    std::vector<std::string> result;
+    std::string token;
+    for (char c : std::string(buf)) {
+        if (c == ',') {
+            // trim whitespace
+            size_t s = token.find_first_not_of(" \t");
+            size_t e = token.find_last_not_of(" \t");
+            if (s != std::string::npos) result.push_back(token.substr(s, e - s + 1));
+            token.clear();
+        } else {
+            token += c;
+        }
+    }
+    {
+        size_t s = token.find_first_not_of(" \t");
+        size_t e = token.find_last_not_of(" \t");
+        if (s != std::string::npos) result.push_back(token.substr(s, e - s + 1));
+    }
+    return result;
+}
+
+void OnScanMono() {
+    if (isDumping) return;
+    isDumping = true;
+    RefreshUI();
+    SendMessage(hLog, WM_SETTEXT, 0, (LPARAM)"");
+
+    std::thread([]() {
+        Log("Scanning Mono assemblies...");
+        Log("");
+
+        Dumper d;
+        d.OnLog(Log);
+        d.OnProgress(Progress);
+
+        auto names = d.ScanMonoAssemblies();
+        if (names.empty()) {
+            Log("[!] No Mono assemblies found");
+            Log("    Make sure the game is running with mono-2.0-sgen.dll loaded");
+        } else {
+            char buf[64];
+            sprintf_s(buf, "[+] %zu Mono assemblies found:", names.size());
+            Log(buf);
+            Log("");
+            for (const auto& n : names) Log("  " + n);
+            Log("");
+            Log("Tip: Copy names into the filter box above (comma-separated)");
+        }
+
+        Status("Scan complete");
+        isDumping = false;
+        RefreshUI();
+    }).detach();
+}
+
+void OnStartMono() {
+    if (isDumping) return;
+    isDumping = true;
+    g_LastWasMono = true;
+    RefreshUI();
+    SetWindowTextA(hBtnMono, "  Exporting...");
+    SendMessage(hLog, WM_SETTEXT, 0, (LPARAM)"");
+    Progress(0, 100);
+
+    auto filter = ParseFilter();
+
+    std::thread([filter]() {
+        if (filter.empty()) {
+            Log("Initializing Mono API... (no filter = dump all non-system)");
+        } else {
+            std::string joined;
+            for (size_t i = 0; i < filter.size(); i++) {
+                if (i > 0) joined += ", ";
+                joined += filter[i];
+            }
+            Log("Initializing Mono API... (filter: " + joined + ")");
+        }
+
+        Dumper d;
+        d.OnLog(Log);
+        d.OnProgress(Progress);
+
+        d.ExportMono(filter);
+
+        Log("");
+        Log("Done. Output -> Mono_Dump_JSON\\");
+        Progress(100, 100);
+        Status("Mono dump complete");
+
+        isDumping = false;
+        SetWindowTextA(hBtnMono, "  Export Mono");
+        EnableWindow(hBtnFolder, TRUE);
+        RefreshUI();
+    }).detach();
 }
 
 // Custom dark controls
@@ -246,14 +356,40 @@ void BuildUI(HWND parent) {
     // Buttons
     hBtnStart = CreateWindowA("BUTTON", "  Start Export",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        m, y, 160, 38, parent, (HMENU)IDC_BTN_START, nullptr, nullptr);
+        m, y, 150, 38, parent, (HMENU)IDC_BTN_START, nullptr, nullptr);
     SendMessage(hBtnStart, WM_SETFONT, (WPARAM)hFontBold, TRUE);
+
+    hBtnMono = CreateWindowA("BUTTON", "  Export Mono",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        m + 160, y, 150, 38, parent, (HMENU)IDC_BTN_MONO, nullptr, nullptr);
+    SendMessage(hBtnMono, WM_SETFONT, (WPARAM)hFontUI, TRUE);
 
     hBtnFolder = CreateWindowA("BUTTON", "  Open Folder",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-        m + 170, y, 140, 38, parent, (HMENU)IDC_BTN_FOLDER, nullptr, nullptr);
+        m + 320, y, 130, 38, parent, (HMENU)IDC_BTN_FOLDER, nullptr, nullptr);
     SendMessage(hBtnFolder, WM_SETFONT, (WPARAM)hFontUI, TRUE);
-    y += 50;
+    y += 48;
+
+    // Mono filter row
+    {
+        HWND lbl = CreateWindowA("STATIC", "Mono Filter:", WS_CHILD | WS_VISIBLE,
+            m, y + 4, 85, 18, parent, nullptr, nullptr, nullptr);
+        SendMessage(lbl, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+        hBtnScanMono = CreateWindowA("BUTTON", "Scan",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            m + 90, y, 60, 26, parent, (HMENU)IDC_BTN_SCAN_MONO, nullptr, nullptr);
+        SendMessage(hBtnScanMono, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+        hEditMonoFilter = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            m + 158, y, cardW - 158, 26, parent, (HMENU)IDC_EDIT_MONO_FILTER, nullptr, nullptr);
+        SendMessage(hEditMonoFilter, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+        // placeholder hint (EM_SETCUEBANNER requires wide string)
+        SendMessageW(hEditMonoFilter, EM_SETCUEBANNER, FALSE,
+            (LPARAM)L"e.g. EcsClient, XDTGame  (blank = all non-system)");
+    }
+    y += 36;
 
     // Progress
     hProgress = CreateWindowExA(0, PROGRESS_CLASSA, nullptr,
@@ -317,6 +453,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case IDC_BTN_START: OnStart(); break;
+                case IDC_BTN_MONO: OnStartMono(); break;
+                case IDC_BTN_SCAN_MONO: OnScanMono(); break;
                 case IDC_BTN_FOLDER: OnOpenFolder(); break;
                 case IDC_RADIO_HUMAN:
                 case IDC_RADIO_AI:

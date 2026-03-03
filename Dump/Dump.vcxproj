@@ -23,6 +23,7 @@
     <ClInclude Include="include\IL2CPP_API.h" />
     <ClInclude Include="include\IL2CPP_Class.h" />
     <ClInclude Include="include\IL2CPP_Image.h" />
+    <ClInclude Include="include\Mono_API.h" />
     <ClInclude Include="include\Resource.h" />
     <ClInclude Include="include\Utils.h" />
   </ItemGroup>
@@ -32,6 +33,7 @@
     <ClCompile Include="src\IL2CPP_Class.cpp" />
     <ClCompile Include="src\IL2CPP_Image.cpp" />
     <ClCompile Include="src\Main.cpp" />
+    <ClCompile Include="src\Mono_API.cpp" />
     <ClCompile Include="src\Utils.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

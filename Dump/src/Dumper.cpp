@@ -1,5 +1,6 @@
 #include "../include/Dumper.h"
 #include "../include/IL2CPP_API.h"
+#include "../include/Mono_API.h"
 #include "../include/Utils.h"
 #include <Windows.h>
 #include <fstream>
@@ -350,4 +351,219 @@ void Dumper::ExportCustom(bool cs, bool json, bool summary) {
             ExportAssembly(*img, OutputFormat::JsonSummary);
         }
     }
+}
+
+std::vector<std::string> Dumper::ScanMonoAssemblies() {
+    std::vector<std::string> names;
+    if (!Mono::Initialize()) {
+        Log("[!] mono-2.0-sgen.dll not found or API unavailable");
+        return names;
+    }
+    void* domain = Mono::GetRootDomain();
+    if (!domain) {
+        Log("[!] Failed to get Mono root domain");
+        return names;
+    }
+    Mono::ForEachAssembly(domain, [&](void* assembly) {
+        if (!assembly) return;
+        void* image = Mono::AssemblyGetImage(assembly);
+        if (!image) return;
+        const char* name = Mono::ImageGetName(image);
+        if (name && *name) names.push_back(name);
+    });
+    return names;
+}
+
+void Dumper::ExportMono(const std::vector<std::string>& include) {
+    if (!Mono::Initialize()) {
+        Log("[!] mono-2.0-sgen.dll not found or API unavailable");
+        return;
+    }
+    Log("[+] Mono API initialized");
+
+    void* domain = Mono::GetRootDomain();
+    if (!domain) {
+        Log("[!] Failed to get Mono root domain");
+        return;
+    }
+
+    std::string baseDir = Utils::GetGameDir();
+    std::string outDir  = baseDir + "Mono_Dump_JSON\\";
+    Utils::CreateDir(outDir);
+
+    int assemblyCount = 0;
+    int exportedCount = 0;
+
+    Mono::ForEachAssembly(domain, [&](void* assembly) {
+        if (!assembly) return;
+        void* image = Mono::AssemblyGetImage(assembly);
+        if (!image) return;
+
+        const char* rawName = Mono::ImageGetName(image);
+        if (!rawName || !*rawName) return;
+        assemblyCount++;
+
+        std::string asmName(rawName);
+
+        // include 목록이 있으면 키워드 매칭, 없으면 ShouldSkipAssembly 기본 필터 적용
+        if (!include.empty()) {
+            std::string lowerName = asmName;
+            for (char& c : lowerName) c = (char)tolower((unsigned char)c);
+            bool matched = false;
+            for (const auto& kw : include) {
+                std::string lowerKw = kw;
+                for (char& c : lowerKw) c = (char)tolower((unsigned char)c);
+                if (lowerName.find(lowerKw) != std::string::npos) { matched = true; break; }
+            }
+            if (!matched) return;
+        } else {
+            if (ShouldSkipAssembly(asmName)) return;
+        }
+
+        Log("Exporting (Mono): " + asmName);
+
+        std::string safeName = asmName;
+        for (char& c : safeName) { if (c == '.' || c == '-') c = '_'; }
+
+        std::ofstream out(outDir + safeName + ".json");
+        if (!out.is_open()) {
+            Log("  [ERROR] Cannot write: " + outDir + safeName + ".json");
+            return;
+        }
+
+        // TYPEDEF table = 2, rows are 1-based
+        int rowCount = Mono::ImageGetTableRows(image, 2);
+
+        out << "{\n";
+        out << "  \"assembly\": \"" << EscapeJson(asmName) << "\",\n";
+        out << "  \"classes\": [\n";
+
+        bool firstClass = true;
+        for (int row = 1; row <= rowCount; row++) {
+            uint32_t token = 0x02000000 | (uint32_t)row;
+            void* klass = Mono::ClassGet(image, token);
+            if (!klass) continue;
+
+            const char* cn  = Mono::ClassGetName(klass);
+            const char* cns = Mono::ClassGetNamespace(klass);
+            if (!cn || !*cn) continue;
+
+            std::string name(cn);
+            std::string ns(cns ? cns : "");
+            if (ShouldSkipClass(name)) continue;
+
+            if (!firstClass) out << ",\n";
+            firstClass = false;
+
+            std::string type = Mono::ClassIsInterface(klass) ? "interface"
+                             : Mono::ClassIsValueType(klass)  ? "struct"
+                             : "class";
+            std::string fullName = ns.empty() ? name : ns + "." + name;
+
+            out << "    {\n";
+            out << "      \"name\": \""     << EscapeJson(name)     << "\",\n";
+            out << "      \"fullName\": \"" << EscapeJson(fullName) << "\",\n";
+            out << "      \"type\": \""     << type                 << "\"";
+
+            void* parent = Mono::ClassGetParent(klass);
+            if (parent) {
+                const char* pn = Mono::ClassGetName(parent);
+                if (pn && *pn && std::string(pn) != "Object"
+                              && std::string(pn) != "ValueType"
+                              && std::string(pn) != "Enum") {
+                    out << ",\n      \"extends\": \"" << EscapeJson(pn) << "\"";
+                }
+            }
+
+            // Fields
+            out << ",\n      \"fields\": [";
+            bool firstField = true;
+            void* fiter = nullptr;
+            void* field = nullptr;
+            while ((field = Mono::ClassGetFields(klass, &fiter)) != nullptr) {
+                const char* fn = Mono::FieldGetName(field);
+                if (!fn || !*fn) continue;
+                uint32_t ff = Mono::FieldGetFlags(field);
+                if (ShouldSkipMember(ff)) continue;
+
+                void* ftype = Mono::FieldGetType(field);
+                std::string typeName;
+                if (ftype) {
+                    char* tn = Mono::TypeGetName(ftype);
+                    if (tn) { typeName = tn; Mono::MonoFree(tn); }
+                }
+                int32_t offset = Mono::FieldGetOffset(field);
+
+                if (!firstField) out << ",";
+                firstField = false;
+                out << "\n        {\"name\": \"" << EscapeJson(fn)
+                    << "\", \"type\": \"" << EscapeJson(typeName)
+                    << "\", \"access\": \"" << Utils::AccessModifier(ff)
+                    << "\", \"offset\": \"0x" << std::hex << offset << std::dec << "\"}";
+            }
+            out << "]";
+
+            // Methods
+            out << ",\n      \"methods\": [";
+            bool firstMethod = true;
+            void* miter = nullptr;
+            void* method = nullptr;
+            while ((method = Mono::ClassGetMethods(klass, &miter)) != nullptr) {
+                const char* mn = Mono::MethodGetName(method);
+                if (!mn || !*mn) continue;
+                uint32_t iflags = 0;
+                uint32_t mf = Mono::MethodGetFlags(method, &iflags);
+                if (ShouldSkipMember(mf)) continue;
+
+                std::string retType;
+                std::vector<std::pair<std::string,std::string>> params;
+
+                void* sig = Mono::MethodGetSignature(method);
+                if (sig) {
+                    void* rt = Mono::SignatureGetReturnType(sig);
+                    if (rt) {
+                        char* rtn = Mono::TypeGetName(rt);
+                        if (rtn) { retType = rtn; Mono::MonoFree(rtn); }
+                    }
+                    uint32_t pc = Mono::SignatureGetParamCount(sig);
+                    void* piter = nullptr;
+                    for (uint32_t pi = 0; pi < pc; pi++) {
+                        void* pt = Mono::SignatureGetParams(sig, &piter);
+                        std::string ptName;
+                        if (pt) {
+                            char* ptn = Mono::TypeGetName(pt);
+                            if (ptn) { ptName = ptn; Mono::MonoFree(ptn); }
+                        }
+                        const char* pn = Mono::MethodGetParamName(method, (int)pi);
+                        params.push_back({ ptName, pn ? pn : "" });
+                    }
+                }
+
+                if (!firstMethod) out << ",";
+                firstMethod = false;
+                out << "\n        {\"name\": \"" << EscapeJson(mn)
+                    << "\", \"returns\": \"" << EscapeJson(retType) << "\"";
+                if (!params.empty()) {
+                    out << ", \"params\": [";
+                    for (size_t j = 0; j < params.size(); j++) {
+                        if (j > 0) out << ", ";
+                        out << "{\"type\": \"" << EscapeJson(params[j].first)
+                            << "\", \"name\": \"" << EscapeJson(params[j].second) << "\"}";
+                    }
+                    out << "]";
+                }
+                out << ", \"access\": \"" << Utils::AccessModifier(mf) << "\"}";
+            }
+            out << "]\n";
+            out << "    }";
+        }
+
+        out << "\n  ]\n}\n";
+        exportedCount++;
+    });
+
+    char buf[128];
+    sprintf_s(buf, "\n[+] Mono: %d assemblies found, %d exported", assemblyCount, exportedCount);
+    Log(buf);
+    Log("Output: " + outDir);
 }
