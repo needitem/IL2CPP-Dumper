@@ -1,5 +1,8 @@
 #include "../include/IL2CPP_API.h"
 #include <Windows.h>
+#include <Psapi.h>
+
+#pragma comment(lib, "psapi.lib")
 
 namespace IL2CPP {
 
@@ -61,8 +64,41 @@ static fn_method_get_param pMethodGetParam;
 static fn_method_get_param_name pMethodGetParamName;
 static fn_type_get_name pTypeGetName;
 
+static bool HasRequiredExports(HMODULE hModule) {
+    if (!hModule) return false;
+    return GetProcAddress(hModule, "il2cpp_domain_get")
+        && GetProcAddress(hModule, "il2cpp_domain_get_assemblies")
+        && GetProcAddress(hModule, "il2cpp_assembly_get_image");
+}
+
+static HMODULE FindIL2CPPModule() {
+    const char* fastCandidates[] = {
+        "GameAssembly.dll",
+        nullptr
+    };
+
+    for (int i = 0; fastCandidates[i]; i++) {
+        HMODULE h = GetModuleHandleA(fastCandidates[i]);
+        if (HasRequiredExports(h)) return h;
+    }
+
+    HMODULE mods[2048];
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+        return nullptr;
+    }
+
+    DWORD count = needed / sizeof(HMODULE);
+    for (DWORD i = 0; i < count; i++) {
+        if (HasRequiredExports(mods[i])) {
+            return mods[i];
+        }
+    }
+    return nullptr;
+}
+
 bool Initialize() {
-    HMODULE hModule = GetModuleHandleA("GameAssembly.dll");
+    HMODULE hModule = FindIL2CPPModule();
     if (!hModule) return false;
 
     auto get = [&](const char* name) {

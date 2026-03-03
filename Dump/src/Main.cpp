@@ -194,7 +194,7 @@ void OnScanMono() {
         auto names = d.ScanMonoAssemblies();
         if (names.empty()) {
             Log("[!] No Mono assemblies found");
-            Log("    Make sure the game is running with mono-2.0-sgen.dll loaded");
+            Log("    Make sure the target process loaded a Mono runtime module");
         } else {
             char buf[64];
             sprintf_s(buf, "[+] %zu Mono assemblies found:", names.size());
@@ -390,7 +390,7 @@ void BuildUI(HWND parent) {
         SendMessage(hEditMonoFilter, WM_SETFONT, (WPARAM)hFontUI, TRUE);
         // placeholder hint (EM_SETCUEBANNER requires wide string)
         SendMessageW(hEditMonoFilter, EM_SETCUEBANNER, FALSE,
-            (LPARAM)L"e.g. EcsClient, XDTGame  (blank = all non-system)");
+            (LPARAM)L"e.g. Assembly-CSharp, Game  (blank = all non-system)");
     }
     y += 36;
 

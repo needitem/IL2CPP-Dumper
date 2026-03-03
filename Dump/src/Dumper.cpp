@@ -27,28 +27,40 @@ namespace {
 
 Dumper::Dumper() {
     IL2CPP::Initialize();
-    Sleep(500);
-
     if (!IL2CPP::Initialized) return;
 
-    void* domain = IL2CPP::GetDomain();
-    if (!domain) return;
+    constexpr int kWaitTimeoutMs = 15000;
+    constexpr int kStepMs = 200;
 
-    size_t count = 0;
-    void** assemblies = IL2CPP::GetAssemblies(domain, &count);
-    if (!assemblies) return;
+    for (int waited = 0; waited <= kWaitTimeoutMs; waited += kStepMs) {
+        void* domain = IL2CPP::GetDomain();
+        if (!domain) {
+            Sleep(kStepMs);
+            continue;
+        }
 
-    for (size_t i = 0; i < count; i++) {
-        void* assembly = assemblies[i];
-        if (!assembly) continue;
+        size_t count = 0;
+        void** assemblies = IL2CPP::GetAssemblies(domain, &count);
+        if (!assemblies || count == 0) {
+            Sleep(kStepMs);
+            continue;
+        }
 
-        void* image = IL2CPP::AssemblyGetImage(assembly);
-        if (!image) continue;
+        for (size_t i = 0; i < count; i++) {
+            void* assembly = assemblies[i];
+            if (!assembly) continue;
 
-        const char* name = IL2CPP::ImageGetName(image);
-        if (!name || !*name) continue;
+            void* image = IL2CPP::AssemblyGetImage(assembly);
+            if (!image) continue;
 
-        images.emplace_back(image);
+            const char* name = IL2CPP::ImageGetName(image);
+            if (!name || !*name) continue;
+
+            images.emplace_back(image);
+        }
+
+        if (!images.empty()) return;
+        Sleep(kStepMs);
     }
 }
 
@@ -412,24 +424,24 @@ void Dumper::ExportMonoFromMemory() {
             uint8_t* p = base + off;
             if (p[0] != 'M' || p[1] != 'Z') continue;
 
-            // PE 오프셋 검증
-            DWORD peOff = *(DWORD*)(p + 0x3C);
-            if (peOff < 0x40 || off + peOff + 0x18 > size) continue;
-            if (*(DWORD*)(p + peOff) != 0x00004550) continue; // "PE\0\0"
+            // PE offset validation
+            DWORD peOffset = *(DWORD*)(p + 0x3C);
+            if (peOffset < 0x40 || off + peOffset + 0x18 > size) continue;
+            if (*(DWORD*)(p + peOffset) != 0x00004550) continue; // "PE\0\0"
 
             // Optional header magic
-            WORD magic = *(WORD*)(p + peOff + 0x18);
+            WORD magic = *(WORD*)(p + peOffset + 0x18);
             if (magic != 0x010B && magic != 0x020B) continue;
 
             // DataDirectory[14] = COM Descriptor (.NET header)
             int ddOff = (magic == 0x020B) ? (0x18 + 0x70) : (0x18 + 0x60);
-            if (off + peOff + ddOff + 14 * 8 + 4 > size) continue;
-            DWORD clrRva = *(DWORD*)(p + peOff + ddOff + 14 * 8);
+            if (off + peOffset + ddOff + 14 * 8 + 4 > size) continue;
+            DWORD clrRva = *(DWORD*)(p + peOffset + ddOff + 14 * 8);
             if (clrRva == 0) continue; // native PE, .NET 아님
 
             // .NET 어셈블리 발견
             scanned++;
-            DWORD imgSize = *(DWORD*)(p + peOff + 0x18 + 0x38); // SizeOfImage
+            DWORD imgSize = *(DWORD*)(p + peOffset + 0x18 + 0x38); // SizeOfImage
             if (imgSize == 0 || imgSize > 64 * 1024 * 1024) imgSize = (DWORD)(size - off);
             if (off + imgSize > size) imgSize = (DWORD)(size - off);
 
@@ -457,7 +469,7 @@ void Dumper::ExportMonoFromMemory() {
         Log("Tip: Open .dll files with dnSpy or ILSpy to view contents");
     } else {
         Log("[!] None found - game may not have loaded assemblies yet");
-        Log("    Try: enter game world -> fishing area -> then dump");
+        Log("    Try again after runtime/assemblies are fully loaded");
     }
 }
 

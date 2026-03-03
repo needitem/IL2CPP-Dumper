@@ -8,6 +8,7 @@ A GUI tool for extracting metadata from Unity IL2CPP games.
 
 - **GUI Interface** - Simple button-click dumping
 - **Built-in Injector** - Manual Map injection (no external tools needed)
+- **Architecture-aware Injection** - Auto-detects x86/x64 target and picks matching dumper DLL
 - **3 Output Modes**
   - Human: Complete C# code
   - AI: Filtered JSON for LLM analysis
@@ -35,8 +36,10 @@ msbuild Dump.sln /p:Configuration=Release /p:Platform=x64
 ### Output
 
 ```
-bin\Release\IL2CPP_Dumper.dll    (Dumper DLL)
-bin\Release\IL2CPP_Injector.exe  (Injector)
+bin\x64\Release\IL2CPP_Dumper.dll        (x64 Dumper DLL)
+bin\Win32\Release\IL2CPP_Dumper.dll      (x86 Dumper DLL)
+bin\x64\Release\IL2CPP_Injector.exe      (x64 Injector UI)
+bin\Win32\Release\IL2CPP_Injector.exe    (x86 Injector Helper)
 ```
 
 ## Usage
@@ -56,7 +59,7 @@ Run `IL2CPP_Injector.exe` as **Administrator**.
 
 **Option B: Attach to Running Game**
 1. Launch the game manually
-2. Click **Refresh** to find running IL2CPP games
+2. Click **Refresh** to find running Unity processes
 3. Select process from list
 4. Click **Inject DLL**
 
@@ -155,7 +158,7 @@ C:\IL2CPP_Dump_Summary\
 ### Game not showing in list
 
 - Make sure game is fully loaded before clicking Refresh
-- Only IL2CPP games are detected (requires GameAssembly.dll)
+- The injector targets Unity runtime processes (IL2CPP/Mono)
 
 ### GUI doesn't appear after injection
 
@@ -166,7 +169,7 @@ C:\IL2CPP_Dump_Summary\
 ### "No assemblies found"
 
 - Wait for game to fully load before injecting
-- Inject after reaching main menu/lobby
+- Retry after runtime and assemblies are fully initialized
 
 ### Build fails
 

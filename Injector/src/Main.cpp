@@ -7,12 +7,21 @@
 #include <shellapi.h>
 #include <string>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include "Injector.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "psapi.lib")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#endif
 
 // Colors
 #define CLR_BG          RGB(30, 30, 30)
@@ -40,6 +49,9 @@
 struct ProcessInfo {
     DWORD pid;
     std::string name;
+    std::string path;
+    std::string runtime;
+    USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
 };
 
 static HBRUSH hBrushBg, hBrushCard;
@@ -48,6 +60,212 @@ static HWND hWnd, hList, hEditDll, hEditExe, hStatus;
 static std::vector<ProcessInfo> processes;
 static std::string dllPath;
 static std::string exePath;
+static bool gDllPathManuallySet = false;
+
+static const DWORD kScanAccess =
+    PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ;
+static const DWORD kInjectAccess =
+    PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+
+USHORT GetCurrentMachine() {
+#ifdef _WIN64
+    return IMAGE_FILE_MACHINE_AMD64;
+#else
+    return IMAGE_FILE_MACHINE_I386;
+#endif
+}
+
+const char* MachineToLabel(USHORT machine) {
+    switch (machine) {
+        case IMAGE_FILE_MACHINE_I386: return "x86";
+        case IMAGE_FILE_MACHINE_AMD64: return "x64";
+        case IMAGE_FILE_MACHINE_ARM64: return "arm64";
+        default: return "unknown";
+    }
+}
+
+USHORT GetProcessMachine(HANDLE hProcess) {
+    using fnIsWow64Process2 = BOOL(WINAPI*)(HANDLE, USHORT*, USHORT*);
+    static fnIsWow64Process2 pIsWow64Process2 =
+        (fnIsWow64Process2)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process2");
+
+    if (pIsWow64Process2) {
+        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        if (pIsWow64Process2(hProcess, &processMachine, &nativeMachine)) {
+            if (processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+                return nativeMachine;
+            }
+            return processMachine;
+        }
+    }
+
+    BOOL wow64 = FALSE;
+    if (IsWow64Process(hProcess, &wow64)) {
+#ifdef _WIN64
+        return wow64 ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_AMD64;
+#else
+        return IMAGE_FILE_MACHINE_I386;
+#endif
+    }
+
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+}
+
+std::string ToLowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+std::string NormalizePath(std::string path) {
+    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
+        if (c == '/') return '\\';
+        return (char)std::tolower(c);
+    });
+    return path;
+}
+
+std::string FileNameOnly(const std::string& path) {
+    size_t pos = path.find_last_of("\\/");
+    return (pos == std::string::npos) ? path : path.substr(pos + 1);
+}
+
+std::string GetProcessPath(HANDLE hProcess) {
+    char path[MAX_PATH] = {};
+    DWORD len = MAX_PATH;
+    if (QueryFullProcessImageNameA(hProcess, 0, path, &len)) {
+        return std::string(path, len);
+    }
+    if (GetModuleFileNameExA(hProcess, nullptr, path, MAX_PATH)) {
+        return std::string(path);
+    }
+    return "";
+}
+
+bool IsMonoModuleName(const std::string& lowerName) {
+    return lowerName.find("mono") != std::string::npos ||
+        lowerName.find("sgen") != std::string::npos ||
+        lowerName.find("bdwgc") != std::string::npos ||
+        lowerName.find("coreclr") != std::string::npos ||
+        lowerName.find("hostfxr") != std::string::npos ||
+        lowerName.find("runtime") != std::string::npos;
+}
+
+bool HasIl2CppExportsInModulePath(const std::string& modulePath) {
+    static std::unordered_map<std::string, bool> cache;
+    std::string key = NormalizePath(modulePath);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    HMODULE h = LoadLibraryExA(modulePath.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    if (!h) {
+        cache[key] = false;
+        return false;
+    }
+
+    bool ok = GetProcAddress(h, "il2cpp_domain_get") && GetProcAddress(h, "il2cpp_assembly_get_image");
+    FreeLibrary(h);
+    cache[key] = ok;
+    return ok;
+}
+
+std::vector<ProcessInfo> EnumerateUnityProcesses() {
+    std::vector<ProcessInfo> result;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return result;
+
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            HANDLE hProcess = OpenProcess(kScanAccess, FALSE, pe.th32ProcessID);
+            if (!hProcess) continue;
+
+            HMODULE hMods[1024];
+            DWORD cbNeeded = 0;
+            bool hasIl2Cpp = false;
+            bool hasMono = false;
+            bool hasUnityPlayer = false;
+
+            if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
+                DWORD modCount = cbNeeded / sizeof(HMODULE);
+                std::vector<std::string> modulePaths;
+                modulePaths.reserve(modCount);
+
+                for (DWORD i = 0; i < modCount; i++) {
+                    char modName[MAX_PATH] = {};
+                    if (!GetModuleBaseNameA(hProcess, hMods[i], modName, sizeof(modName))) continue;
+
+                    std::string lower = ToLowerCopy(modName);
+                    if (lower == "unityplayer.dll") hasUnityPlayer = true;
+                    if (lower == "gameassembly.dll") hasIl2Cpp = true;
+                    if (IsMonoModuleName(lower)) hasMono = true;
+
+                    char modPath[MAX_PATH] = {};
+                    if (GetModuleFileNameExA(hProcess, hMods[i], modPath, MAX_PATH)) {
+                        modulePaths.push_back(modPath);
+                    }
+                }
+
+                if (!hasIl2Cpp && hasUnityPlayer) {
+                    for (const auto& path : modulePaths) {
+                        if (HasIl2CppExportsInModulePath(path)) {
+                            hasIl2Cpp = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (hasIl2Cpp || hasUnityPlayer) {
+                ProcessInfo info;
+                info.pid = pe.th32ProcessID;
+                info.machine = GetProcessMachine(hProcess);
+
+                char narrowName[MAX_PATH];
+                WideCharToMultiByte(CP_ACP, 0, pe.szExeFile, -1, narrowName, MAX_PATH, nullptr, nullptr);
+                info.name = narrowName;
+                info.path = GetProcessPath(hProcess);
+                info.runtime = hasIl2Cpp ? "IL2CPP" : (hasMono ? "Mono" : "Unity");
+
+                result.push_back(info);
+            }
+
+            CloseHandle(hProcess);
+        } while (Process32NextW(hSnap, &pe));
+    }
+
+    CloseHandle(hSnap);
+    return result;
+}
+
+int FindBestProcessForLaunch(const std::vector<ProcessInfo>& list,
+    const std::string& targetExePath,
+    const std::unordered_set<DWORD>& attemptedPids) {
+
+    if (list.empty()) return -1;
+    std::string targetPath = NormalizePath(targetExePath);
+    std::string targetName = ToLowerCopy(FileNameOnly(targetExePath));
+
+    int nameMatch = -1;
+    int fallback = -1;
+
+    for (size_t i = 0; i < list.size(); i++) {
+        if (attemptedPids.count(list[i].pid)) continue;
+
+        if (!list[i].path.empty() && NormalizePath(list[i].path) == targetPath) {
+            return (int)i;
+        }
+
+        if (nameMatch == -1 && ToLowerCopy(list[i].name) == targetName) {
+            nameMatch = (int)i;
+        }
+
+        if (fallback == -1) fallback = (int)i;
+    }
+
+    if (nameMatch != -1) return nameMatch;
+    return fallback;
+}
 
 bool EnableDebugPrivilege() {
     HANDLE hToken;
@@ -100,9 +318,9 @@ void Status(const std::string& text) {
 }
 
 std::string GetDefaultDllPath() {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    std::string path = exePath;
+    char exePathBuf[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePathBuf, MAX_PATH);
+    std::string path = exePathBuf;
     size_t pos = path.find_last_of("\\/");
     if (pos != std::string::npos) {
         path = path.substr(0, pos + 1);
@@ -110,58 +328,39 @@ std::string GetDefaultDllPath() {
     return path + "IL2CPP_Dumper.dll";
 }
 
+std::string GetExecutableDir() {
+    char exePathBuf[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePathBuf, MAX_PATH);
+    std::string path = exePathBuf;
+    size_t pos = path.find_last_of("\\/");
+    return (pos != std::string::npos) ? path.substr(0, pos + 1) : "";
+}
+
+std::string GetDefaultDllPathForMachine(USHORT machine) {
+    std::string dir = GetExecutableDir();
+    const char* name = (machine == IMAGE_FILE_MACHINE_I386) ? "IL2CPP_Dumper_x86.dll" : "IL2CPP_Dumper_x64.dll";
+    std::string preferred = dir + name;
+    if (GetFileAttributesA(preferred.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return preferred;
+    }
+    return GetDefaultDllPath();
+}
+
 void RefreshProcessList() {
-    processes.clear();
+    processes = EnumerateUnityProcesses();
     SendMessage(hList, LB_RESETCONTENT, 0, 0);
 
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnap == INVALID_HANDLE_VALUE) return;
-
-    PROCESSENTRY32W pe = { sizeof(pe) };
-    if (Process32FirstW(hSnap, &pe)) {
-        do {
-            HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
-            if (hProcess) {
-                HMODULE hMods[1024];
-                DWORD cbNeeded;
-                bool hasGameAssembly = false;
-
-                if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-                    for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
-                        char modName[MAX_PATH];
-                        if (GetModuleBaseNameA(hProcess, hMods[i], modName, sizeof(modName))) {
-                            if (_stricmp(modName, "GameAssembly.dll") == 0) {
-                                hasGameAssembly = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (hasGameAssembly) {
-                    ProcessInfo info;
-                    info.pid = pe.th32ProcessID;
-                    char narrowName[MAX_PATH];
-                    WideCharToMultiByte(CP_ACP, 0, pe.szExeFile, -1, narrowName, MAX_PATH, nullptr, nullptr);
-                    info.name = narrowName;
-                    processes.push_back(info);
-
-                    char buf[512];
-                    sprintf_s(buf, "[%d] %s", info.pid, info.name.c_str());
-                    SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)buf);
-                }
-
-                CloseHandle(hProcess);
-            }
-        } while (Process32NextW(hSnap, &pe));
+    for (const auto& info : processes) {
+        char buf[512];
+        sprintf_s(buf, "[%d] [%s/%s] %s", info.pid, info.runtime.c_str(), MachineToLabel(info.machine), info.name.c_str());
+        SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)buf);
     }
-    CloseHandle(hSnap);
 
     if (processes.empty()) {
-        Status("No IL2CPP games found. Launch a game or use 'Launch & Inject'.");
+        Status("No Unity process found. Launch target or use 'Launch & Inject'.");
     } else {
         char buf[64];
-        sprintf_s(buf, "Found %zu IL2CPP game(s)", processes.size());
+        sprintf_s(buf, "Found %zu Unity process(es)", processes.size());
         Status(buf);
     }
 }
@@ -179,6 +378,7 @@ void BrowseDll() {
 
     if (GetOpenFileNameA(&ofn)) {
         dllPath = filename;
+        gDllPathManuallySet = true;
         SetWindowTextA(hEditDll, dllPath.c_str());
     }
 }
@@ -198,6 +398,22 @@ void BrowseExe() {
         exePath = filename;
         SetWindowTextA(hEditExe, exePath.c_str());
     }
+}
+
+std::string ResolveDllPathForTargetMachine(USHORT machine) {
+    char currentPath[MAX_PATH] = {};
+    GetWindowTextA(hEditDll, currentPath, MAX_PATH);
+    std::string configured = currentPath;
+
+    if (gDllPathManuallySet && !configured.empty()) {
+        return configured;
+    }
+
+    std::string autoPath = GetDefaultDllPathForMachine(machine);
+    if (!autoPath.empty()) {
+        SetWindowTextA(hEditDll, autoPath.c_str());
+    }
+    return autoPath;
 }
 
 void WriteOutputConfig(HANDLE hProcess) {
@@ -224,67 +440,7 @@ void WriteOutputConfig(HANDLE hProcess) {
     }
 }
 
-bool IsSteamGame(const std::string& gameExeDir) {
-    std::string appidFile = gameExeDir + "\\steam_appid.txt";
-    if (GetFileAttributesA(appidFile.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return true;
-    // Check for steam_api64.dll or steam_api.dll in game directory
-    std::string steamApi64 = gameExeDir + "\\steam_api64.dll";
-    std::string steamApi32 = gameExeDir + "\\steam_api.dll";
-    if (GetFileAttributesA(steamApi64.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return true;
-    if (GetFileAttributesA(steamApi32.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return true;
-    return false;
-}
-
-// Collect all PIDs that have GameAssembly.dll loaded
-std::vector<DWORD> FindAllIL2CPPPids() {
-    std::vector<DWORD> pids;
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnap == INVALID_HANDLE_VALUE) return pids;
-
-    PROCESSENTRY32W pe = { sizeof(pe) };
-    if (Process32FirstW(hSnap, &pe)) {
-        do {
-            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
-            if (hProc) {
-                HMODULE hMods[1024];
-                DWORD cbNeeded;
-                if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded)) {
-                    for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
-                        char modName[MAX_PATH];
-                        if (GetModuleBaseNameA(hProc, hMods[i], modName, sizeof(modName))) {
-                            if (_stricmp(modName, "GameAssembly.dll") == 0) {
-                                pids.push_back(pe.th32ProcessID);
-                                break;
-                            }
-                        }
-                    }
-                }
-                CloseHandle(hProc);
-            }
-        } while (Process32NextW(hSnap, &pe));
-    }
-    CloseHandle(hSnap);
-    return pids;
-}
-
-// Find a NEW IL2CPP process that wasn't in the exclude list
-DWORD FindNewIL2CPPProcess(const std::vector<DWORD>& excludePids) {
-    auto allPids = FindAllIL2CPPPids();
-    for (DWORD pid : allPids) {
-        bool excluded = false;
-        for (DWORD ex : excludePids) {
-            if (pid == ex) { excluded = true; break; }
-        }
-        if (!excluded) return pid;
-    }
-    return 0;
-}
-
-bool InjectWithSelectedMethod(HANDLE hProcess, const char* dllFile, std::string& error) {
-    bool useMMap = (IsDlgButtonChecked(hWnd, IDC_RADIO_MMAP) == BST_CHECKED);
+bool InjectWithMethod(HANDLE hProcess, const char* dllFile, bool useMMap, std::string& error) {
     if (useMMap) {
         bool success = Injector::ManualMap(hProcess, dllFile, error);
         if (!success) {
@@ -302,6 +458,63 @@ bool InjectWithSelectedMethod(HANDLE hProcess, const char* dllFile, std::string&
     }
 }
 
+bool InjectWithSelectedMethod(HANDLE hProcess, const char* dllFile, std::string& error) {
+    bool useMMap = (IsDlgButtonChecked(hWnd, IDC_RADIO_MMAP) == BST_CHECKED);
+    return InjectWithMethod(hProcess, dllFile, useMMap, error);
+}
+
+bool RunHelperInjector(DWORD pid, USHORT targetMachine, const std::string& dllFile, bool useMMap, std::string& error) {
+    std::string dir = GetExecutableDir();
+    std::string helper = dir + ((targetMachine == IMAGE_FILE_MACHINE_I386) ? "IL2CPP_Injector_x86.exe" : "IL2CPP_Injector_x64.exe");
+    if (GetFileAttributesA(helper.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = "Missing helper injector: " + helper;
+        return false;
+    }
+
+    std::string cmd = "\"" + helper + "\" --inject-pid " + std::to_string(pid)
+        + " --dll \"" + dllFile + "\" --method " + (useMMap ? "mmap" : "loadlib");
+
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) {
+        error = "CreateProcess(helper) failed: " + std::to_string(GetLastError());
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (exitCode != 0) {
+        error = "Helper injector failed with exit code " + std::to_string(exitCode);
+        return false;
+    }
+    return true;
+}
+
+bool InjectProcessByPidDirect(DWORD pid, const std::string& dllFile, bool useMMap, std::string& error) {
+    HANDLE hProcess = OpenProcess(kInjectAccess, FALSE, pid);
+    if (!hProcess) {
+        error = "Failed to open process: " + std::to_string(GetLastError());
+        return false;
+    }
+
+    WriteOutputConfig(hProcess);
+    bool success = InjectWithMethod(hProcess, dllFile.c_str(), useMMap, error);
+    CloseHandle(hProcess);
+    return success;
+}
+
+bool InjectProcessByPidAuto(DWORD pid, USHORT targetMachine, const std::string& dllFile, bool useMMap, std::string& error) {
+    USHORT selfMachine = GetCurrentMachine();
+    if (targetMachine != IMAGE_FILE_MACHINE_UNKNOWN && selfMachine != targetMachine) {
+        return RunHelperInjector(pid, targetMachine, dllFile, useMMap, error);
+    }
+    return InjectProcessByPidDirect(pid, dllFile, useMMap, error);
+}
+
 void DoInject() {
     int sel = (int)SendMessage(hList, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR || sel >= (int)processes.size()) {
@@ -309,35 +522,25 @@ void DoInject() {
         return;
     }
 
-    char path[MAX_PATH];
-    GetWindowTextA(hEditDll, path, MAX_PATH);
-    if (strlen(path) == 0) {
+    std::string dllToUse = ResolveDllPathForTargetMachine(processes[sel].machine);
+    if (dllToUse.empty()) {
         Status("Select DLL path first");
         return;
     }
 
-    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+    if (GetFileAttributesA(dllToUse.c_str()) == INVALID_FILE_ATTRIBUTES) {
         Status("DLL file not found");
         return;
     }
 
     Status("Injecting...");
-
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processes[sel].pid);
-    if (!hProcess) {
-        Status("Failed to open process. Run as Administrator.");
-        return;
-    }
-
-    WriteOutputConfig(hProcess);
-
+    bool useMMap = (IsDlgButtonChecked(hWnd, IDC_RADIO_MMAP) == BST_CHECKED);
     std::string error;
-    bool success = InjectWithSelectedMethod(hProcess, path, error);
-    CloseHandle(hProcess);
+    bool success = InjectProcessByPidAuto(processes[sel].pid, processes[sel].machine, dllToUse, useMMap, error);
 
     if (success) {
         Status("Injection successful!");
-        MessageBoxA(hWnd, "DLL injected successfully!\n\nThe IL2CPP Dumper GUI should appear in the game.",
+        MessageBoxA(hWnd, "DLL injected successfully!\n\nThe dumper UI should appear in the target process.",
             "Success", MB_OK | MB_ICONINFORMATION);
     } else {
         Status(("Failed: " + error).c_str());
@@ -358,11 +561,13 @@ void DoLaunchAndInject() {
         return;
     }
 
-    char dllFile[MAX_PATH];
-    GetWindowTextA(hEditDll, dllFile, MAX_PATH);
-    if (strlen(dllFile) == 0 || GetFileAttributesA(dllFile) == INVALID_FILE_ATTRIBUTES) {
-        Status("DLL file not found");
-        return;
+    if (gDllPathManuallySet) {
+        char dllFile[MAX_PATH];
+        GetWindowTextA(hEditDll, dllFile, MAX_PATH);
+        if (strlen(dllFile) == 0 || GetFileAttributesA(dllFile) == INVALID_FILE_ATTRIBUTES) {
+            Status("DLL file not found");
+            return;
+        }
     }
 
     // Get working directory from exe path
@@ -372,45 +577,56 @@ void DoLaunchAndInject() {
         workDir = workDir.substr(0, pos);
     }
 
-    // Launch game normally via ShellExecute
-    Status("Launching game...");
-    ShellExecuteA(nullptr, "open", gameExe, nullptr, workDir.c_str(), SW_SHOW);
+    // Launch target normally via ShellExecute
+    Status("Launching target...");
+    HINSTANCE launchResult = ShellExecuteA(nullptr, "open", gameExe, nullptr, workDir.c_str(), SW_SHOW);
+    if ((INT_PTR)launchResult <= 32) {
+        Status("Failed to launch target EXE");
+        MessageBoxA(hWnd, "Failed to launch target EXE.", "Error", MB_OK | MB_ICONERROR);
+        return;
+    }
 
-    // Poll for IL2CPP process and retry injection (up to 90 seconds)
-    // Steam may kill the first process and relaunch - keep trying
+    std::unordered_set<DWORD> attemptedPids;
     std::string lastError;
     for (int attempt = 1; attempt <= 30; attempt++) {
-        char statusBuf[80];
-        sprintf_s(statusBuf, "Waiting for game... (%d/30)", attempt);
+        char statusBuf[96];
+        sprintf_s(statusBuf, "Waiting for target process... (%d/30)", attempt);
         Status(statusBuf);
         Sleep(3000);
 
         RefreshProcessList();
-        if (processes.empty()) continue; // process not (yet) found, keep waiting
+        if (processes.empty()) continue;
 
-        SendMessage(hList, LB_SETCURSEL, 0, 0);
+        int bestIndex = FindBestProcessForLaunch(processes, gameExe, attemptedPids);
+        if (bestIndex < 0 || bestIndex >= (int)processes.size()) continue;
 
-        HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processes[0].pid);
-        if (!hProcess) continue;
+        SendMessage(hList, LB_SETCURSEL, bestIndex, 0);
+        DWORD targetPid = processes[bestIndex].pid;
 
-        WriteOutputConfig(hProcess);
+        std::string dllToUse = ResolveDllPathForTargetMachine(processes[bestIndex].machine);
+        if (dllToUse.empty() || GetFileAttributesA(dllToUse.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            lastError = "DLL file not found for target architecture";
+            break;
+        }
 
+        bool useMMap = (IsDlgButtonChecked(hWnd, IDC_RADIO_MMAP) == BST_CHECKED);
         lastError.clear();
-        bool success = InjectWithSelectedMethod(hProcess, dllFile, lastError);
-        CloseHandle(hProcess);
+        bool success = InjectProcessByPidAuto(targetPid, processes[bestIndex].machine, dllToUse, useMMap, lastError);
 
         if (success) {
             Status("Injection successful!");
-            MessageBoxA(hWnd, "Game launched and DLL injected!\n\nThe IL2CPP Dumper GUI should appear in the game.",
+            MessageBoxA(hWnd, "Target launched and DLL injected.\n\nThe dumper UI should appear in the target process.",
                 "Success", MB_OK | MB_ICONINFORMATION);
             return;
         }
-        // Injection failed - maybe wrong process or not ready yet, keep trying
+
+        attemptedPids.insert(targetPid);
+        // may not be fully initialized yet, keep polling
     }
 
     Status(("Injection failed: " + lastError).c_str());
     MessageBoxA(hWnd,
-        ("Injection failed after 30 attempts:\n" + lastError + "\n\nTry manual 'Refresh -> Inject' instead.").c_str(),
+        ("Injection failed after 30 attempts:\n" + lastError + "\n\nTry manual 'Refresh -> Inject' and select the exact process.").c_str(),
         "Error", MB_OK | MB_ICONERROR);
 }
 
@@ -460,13 +676,13 @@ void BuildUI(HWND parent) {
     y += 50;
 
     // Separator
-    HWND hSep = CreateWindowA("STATIC", "- OR attach to running game -", WS_CHILD | WS_VISIBLE | SS_CENTER,
+    HWND hSep = CreateWindowA("STATIC", "- OR attach to running process -", WS_CHILD | WS_VISIBLE | SS_CENTER,
         m, y, w, 20, parent, nullptr, nullptr, nullptr);
     SendMessage(hSep, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     y += 30;
 
-    // === Section: Running Games ===
-    HWND hLbl1 = CreateWindowA("STATIC", "Running IL2CPP Games:", WS_CHILD | WS_VISIBLE,
+    // === Section: Running Processes ===
+    HWND hLbl1 = CreateWindowA("STATIC", "Running Unity Processes:", WS_CHILD | WS_VISIBLE,
         m, y, 200, 20, parent, nullptr, nullptr, nullptr);
     SendMessage(hLbl1, WM_SETFONT, (WPARAM)hFontBold, TRUE);
 
@@ -524,12 +740,13 @@ void BuildUI(HWND parent) {
     y += 30;
 
     // Status
-    hStatus = CreateWindowA("STATIC", "Select game EXE or click Refresh", WS_CHILD | WS_VISIBLE | SS_CENTER,
+    hStatus = CreateWindowA("STATIC", "Select target EXE or click Refresh", WS_CHILD | WS_VISIBLE | SS_CENTER,
         m, y, w, 20, parent, (HMENU)IDC_STATUS, nullptr, nullptr);
     SendMessage(hStatus, WM_SETFONT, (WPARAM)hFontUI, TRUE);
 
     // Set default DLL path
-    dllPath = GetDefaultDllPath();
+    gDllPathManuallySet = false;
+    dllPath = GetDefaultDllPathForMachine(GetCurrentMachine());
     SetWindowTextA(hEditDll, dllPath.c_str());
 }
 
@@ -584,9 +801,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+struct CliOptions {
+    bool injectMode = false;
+    DWORD pid = 0;
+    std::string dllPath;
+    bool useMMap = true;
+};
+
+std::string WideToAnsi(LPCWSTR ws) {
+    if (!ws) return "";
+    int len = WideCharToMultiByte(CP_ACP, 0, ws, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return "";
+    std::string out((size_t)len - 1, '\0');
+    WideCharToMultiByte(CP_ACP, 0, ws, -1, out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+bool ParseCliOptions(CliOptions& opts) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv || argc <= 1) {
+        if (argv) LocalFree(argv);
+        return false;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = ToLowerCopy(WideToAnsi(argv[i]));
+        if (arg == "--inject-pid" && i + 1 < argc) {
+            opts.injectMode = true;
+            opts.pid = (DWORD)strtoul(WideToAnsi(argv[++i]).c_str(), nullptr, 10);
+        } else if (arg == "--dll" && i + 1 < argc) {
+            opts.dllPath = WideToAnsi(argv[++i]);
+        } else if (arg == "--method" && i + 1 < argc) {
+            std::string m = ToLowerCopy(WideToAnsi(argv[++i]));
+            opts.useMMap = (m != "loadlib");
+        }
+    }
+    LocalFree(argv);
+    return opts.injectMode;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    CliOptions cli;
+    bool cliMode = ParseCliOptions(cli);
+
     // Check admin rights
     if (!IsRunAsAdmin()) {
+        if (cliMode) return 2;
         int result = MessageBoxA(nullptr,
             "This application requires Administrator privileges to inject DLLs.\n\n"
             "Click OK to restart as Administrator, or Cancel to exit.",
@@ -599,6 +860,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     EnableDebugPrivilege();
+
+    if (cliMode) {
+        if (cli.pid == 0 || cli.dllPath.empty()) return 3;
+        if (GetFileAttributesA(cli.dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) return 4;
+
+        std::string error;
+        bool ok = InjectProcessByPidDirect(cli.pid, cli.dllPath, cli.useMMap, error);
+        return ok ? 0 : 5;
+    }
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
