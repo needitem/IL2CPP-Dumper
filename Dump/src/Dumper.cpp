@@ -356,9 +356,13 @@ void Dumper::ExportCustom(bool cs, bool json, bool summary) {
 std::vector<std::string> Dumper::ScanMonoAssemblies() {
     std::vector<std::string> names;
     if (!Mono::Initialize()) {
-        Log("[!] mono-2.0-sgen.dll not found or API unavailable");
+        Log("[!] Mono API unavailable");
+        Log("    Possible causes:");
+        Log("    1. Game not fully loaded yet - enter the game world first");
+        Log("    2. Mono DLL not yet loaded by XMonoRuntime - wait and retry");
         return names;
     }
+    Log("[+] Mono API initialized");
     void* domain = Mono::GetRootDomain();
     if (!domain) {
         Log("[!] Failed to get Mono root domain");
@@ -376,7 +380,10 @@ std::vector<std::string> Dumper::ScanMonoAssemblies() {
 
 void Dumper::ExportMono(const std::vector<std::string>& include) {
     if (!Mono::Initialize()) {
-        Log("[!] mono-2.0-sgen.dll not found or API unavailable");
+        Log("[!] Mono API unavailable");
+        Log("    Possible causes:");
+        Log("    1. Game not fully loaded yet - enter the game world first");
+        Log("    2. Mono DLL not yet loaded by XMonoRuntime - wait and retry");
         return;
     }
     Log("[+] Mono API initialized");

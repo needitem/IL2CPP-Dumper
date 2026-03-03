@@ -1,5 +1,7 @@
 #include "../include/Mono_API.h"
 #include <Windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 
 namespace Mono {
 
@@ -60,8 +62,35 @@ static fn_field_get_offset     pFieldGetOffset;
 static fn_type_get_name        pTypeGetName;
 static fn_free                 pFree;
 
+// mono_get_root_domain을 익스포트하는 모듈을 현재 프로세스에서 탐색
+static HMODULE FindMonoModule() {
+    // 1. 먼저 흔한 이름들을 직접 시도
+    const char* candidates[] = {
+        "mono-2.0-sgen.dll",
+        "mono-2.0-bdwgc.dll",
+        "mono.dll",
+        "XDEmbeddingMono.dll",
+        nullptr
+    };
+    for (int i = 0; candidates[i]; i++) {
+        HMODULE h = GetModuleHandleA(candidates[i]);
+        if (h && GetProcAddress(h, "mono_get_root_domain")) return h;
+    }
+
+    // 2. 전체 모듈 목록 열거 — 이름 무관하게 mono_get_root_domain 익스포트 모듈 탐색
+    HMODULE mods[1024];
+    DWORD needed = 0;
+    if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+        DWORD count = needed / sizeof(HMODULE);
+        for (DWORD i = 0; i < count; i++) {
+            if (GetProcAddress(mods[i], "mono_get_root_domain")) return mods[i];
+        }
+    }
+    return nullptr;
+}
+
 bool Initialize() {
-    HMODULE hMono = GetModuleHandleA("mono-2.0-sgen.dll");
+    HMODULE hMono = FindMonoModule();
     if (!hMono) return false;
 
     auto get = [&](const char* name) {
