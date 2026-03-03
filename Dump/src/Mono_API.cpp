@@ -62,8 +62,12 @@ static fn_field_get_offset     pFieldGetOffset;
 static fn_type_get_name        pTypeGetName;
 static fn_free                 pFree;
 
-// mono_get_root_domain을 익스포트하는 모듈을 현재 프로세스에서 탐색
+// 로드된 모든 모듈 이름을 로그에 출력하고 mono_get_root_domain 익스포트 모듈 탐색
+static std::string g_DiagLog; // Initialize() 실패 시 진단 메시지
+
 static HMODULE FindMonoModule() {
+    g_DiagLog.clear();
+
     // 1. 먼저 흔한 이름들을 직접 시도
     const char* candidates[] = {
         "mono-2.0-sgen.dll",
@@ -77,17 +81,34 @@ static HMODULE FindMonoModule() {
         if (h && GetProcAddress(h, "mono_get_root_domain")) return h;
     }
 
-    // 2. 전체 모듈 목록 열거 — 이름 무관하게 mono_get_root_domain 익스포트 모듈 탐색
-    HMODULE mods[1024];
+    // 2. 전체 모듈 목록 열거 — mono_get_root_domain 익스포트 모듈 탐색 + 진단 로그 수집
+    HMODULE mods[2048];
     DWORD needed = 0;
     if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
         DWORD count = needed / sizeof(HMODULE);
+        g_DiagLog += "    Loaded modules (" + std::to_string(count) + "):\n";
         for (DWORD i = 0; i < count; i++) {
             if (GetProcAddress(mods[i], "mono_get_root_domain")) return mods[i];
+            // 진단용: mono/sgen/dotnet/runtime 포함 모듈 이름 수집
+            char name[MAX_PATH] = {};
+            GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, MAX_PATH);
+            std::string n(name);
+            bool interesting = false;
+            for (char& c : n) c = (char)tolower((unsigned char)c);
+            if (n.find("mono") != std::string::npos || n.find("sgen") != std::string::npos ||
+                n.find("coreclr") != std::string::npos || n.find("hostfxr") != std::string::npos ||
+                n.find("runtime") != std::string::npos || n.find("xmono") != std::string::npos ||
+                n.find("xd") == 0)
+                interesting = true;
+            if (interesting) g_DiagLog += "      [!] " + std::string(name) + "\n";
         }
+    } else {
+        g_DiagLog += "    EnumProcessModules failed (error " + std::to_string(GetLastError()) + ")\n";
     }
     return nullptr;
 }
+
+const std::string& GetDiagLog() { return g_DiagLog; }
 
 bool Initialize() {
     HMODULE hMono = FindMonoModule();

@@ -11,7 +11,8 @@ extern bool Initialized;
 // Assembly enumeration callback
 using AssemblyCallback = std::function<void(void* assembly)>;
 
-bool Initialize(); // loads from mono-2.0-sgen.dll
+bool Initialize();
+const std::string& GetDiagLog(); // Initialize() 실패 시 진단 로그
 
 void ForEachAssembly(void* domain, AssemblyCallback cb);
 void* GetRootDomain();
