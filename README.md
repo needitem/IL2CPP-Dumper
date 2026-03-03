@@ -16,6 +16,15 @@ A GUI tool for extracting metadata from Unity IL2CPP games.
 - **Real-time Progress** - Progress bar and log display
 - **Smart Filtering** - Auto-exclude Unity/System assemblies
 
+## Quick Start (Recommended)
+
+1. Download the latest release zip (`IL2CPP-Universal-*.zip`).
+2. Extract all files into one folder.
+3. Run `IL2CPP_Injector.exe` as Administrator.
+4. Select target process and inject.
+
+> Keep all files in the same folder (`IL2CPP_Injector.exe`, `IL2CPP_Injector_x86.exe`, `IL2CPP_Injector_x64.exe`, `IL2CPP_Dumper_x86.dll`, `IL2CPP_Dumper_x64.dll`).
+
 ## Build
 
 ### Requirements
@@ -29,7 +38,8 @@ A GUI tool for extracting metadata from Unity IL2CPP games.
 # Open in Visual Studio
 start Dump.sln
 
-# Or command line build
+# Or command line build (both architectures)
+msbuild Dump.sln /p:Configuration=Release /p:Platform=x86
 msbuild Dump.sln /p:Configuration=Release /p:Platform=x64
 ```
 
@@ -46,11 +56,12 @@ bin\Win32\Release\IL2CPP_Injector.exe    (x86 Injector Helper)
 
 ### Step 1: Run Injector
 
-Run `IL2CPP_Injector.exe` as **Administrator**.
+Run `IL2CPP_Injector.exe` (x64 UI) as **Administrator**.
 
 > If not running as admin, a prompt will appear.
+> Keep x86/x64 helper files and dumper DLLs in the same folder.
 
-### Step 2: Select Game or Process
+### Step 2: Select Target EXE or Process
 
 **Option A: Launch Game**
 1. Click **Browse...** next to "Game EXE"
@@ -62,6 +73,8 @@ Run `IL2CPP_Injector.exe` as **Administrator**.
 2. Click **Refresh** to find running Unity processes
 3. Select process from list
 4. Click **Inject DLL**
+
+> The injector automatically handles x86/x64 target matching.
 
 ### Step 3: Use Dumper GUI
 
@@ -165,6 +178,7 @@ C:\IL2CPP_Dump_Summary\
 - Try running injector as administrator
 - Temporarily disable antivirus
 - Try "Launch & Inject" method instead
+- Ensure helper injector and architecture-specific DLL files are in the same folder
 
 ### "No assemblies found"
 
