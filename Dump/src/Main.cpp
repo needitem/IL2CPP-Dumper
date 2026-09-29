@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include <CommCtrl.h>
 #include <shellapi.h>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <Uxtheme.h>
@@ -525,8 +526,50 @@ void Run(HMODULE hMod) {
     }
 }
 
+// Headless mode (IL2CPP_Dumper.cfg: auto=human|ai|mono): no window, output goes
+// to the configured folder, progress to IL2CPP_Dumper.log, and the result to
+// IL2CPP_Dump_DONE.txt so scripts / AI agents know when to read the dump.
+static void RunAuto(const Utils::Config& cfg) {
+    std::string base = Utils::GetGameDir();
+    std::ofstream logFile(base + "IL2CPP_Dumper.log", std::ios::app);
+    auto writeLog = [&](const std::string& s) {
+        logFile << s << "\n";
+        logFile.flush();
+    };
+
+    Dumper d;
+    d.OnLog(writeLog);
+    writeLog("[auto] mode=" + cfg.autoMode + " out=" + base);
+
+    std::string result;
+    if (cfg.autoMode == "mono") {
+        d.ExportMono();
+        result = "ok: mono export finished";
+    } else if (d.images.empty()) {
+        result = "error: no IL2CPP assemblies found";
+        writeLog("[!] " + result);
+    } else if (cfg.autoMode == "human") {
+        d.ExportHuman();
+        result = "ok: " + std::to_string(d.images.size()) + " assemblies (C#)";
+    } else if (cfg.autoMode == "ai") {
+        d.ExportAI();
+        result = "ok: " + std::to_string(d.images.size()) + " assemblies (JSON)";
+    } else {
+        result = "error: unknown auto mode '" + cfg.autoMode + "' (use human | ai | mono)";
+        writeLog("[!] " + result);
+    }
+
+    std::ofstream done(base + "IL2CPP_Dump_DONE.txt", std::ios::trunc);
+    done << result << "\n";
+}
+
 DWORD WINAPI Entry(LPVOID param) {
-    Run((HMODULE)param);
+    const Utils::Config& cfg = Utils::GetConfig();
+    if (!cfg.autoMode.empty()) {
+        RunAuto(cfg);
+    } else {
+        Run((HMODULE)param);
+    }
     FreeLibraryAndExitThread((HMODULE)param, 0);
     return 0;
 }

@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include "IL2CPP_Image.h"
+#include "Model.h"
 
 enum class OutputFormat {
     CSharp,
@@ -16,6 +17,7 @@ struct FilterOptions {
     bool skipSystem = true;
     bool skipPrivate = false;
     bool skipCompilerGenerated = true;
+    int jsonChunkSize = 1000; // max classes per JSON file, 0 = never split
 };
 
 class Dumper {
@@ -48,6 +50,11 @@ private:
     LogFunc logCallback;
     ProgressFunc progressCallback;
 
+    // Filled by ExportAssembly(), written out as index.json by WriteIndexes().
+    std::vector<IndexEntry> indexFull_;
+    std::vector<IndexEntry> indexSummary_;
+
     void Log(const std::string& msg);
     void Progress(int current, int total, const std::string& item);
+    void WriteIndexes();
 };

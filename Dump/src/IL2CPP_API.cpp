@@ -1,6 +1,7 @@
 #include "../include/IL2CPP_API.h"
 #include <Windows.h>
 #include <Psapi.h>
+#include <cstring>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -35,6 +36,14 @@ using fn_method_get_param_count = uint32_t(*)(void*);
 using fn_method_get_param = void*(*)(void*, uint32_t);
 using fn_method_get_param_name = const char*(*)(void*, uint32_t);
 using fn_type_get_name = const char*(*)(void*);
+using fn_class_get_flags = uint32_t(*)(void*);
+using fn_class_is_enum = int(*)(void*);
+using fn_class_enum_basetype = void*(*)(void*);
+using fn_type_get_type = int(*)(void*);
+using fn_class_get_properties = void*(*)(void*, void**);
+using fn_property_get_name = const char*(*)(void*);
+using fn_property_get_method = void*(*)(void*);
+using fn_field_static_get_value = void(*)(void*, void*);
 
 // Function pointers
 static fn_domain_get pDomainGet;
@@ -63,6 +72,18 @@ static fn_method_get_param_count pMethodGetParamCount;
 static fn_method_get_param pMethodGetParam;
 static fn_method_get_param_name pMethodGetParamName;
 static fn_type_get_name pTypeGetName;
+static fn_class_get_flags pClassGetFlags;
+static fn_class_is_enum pClassIsEnum;
+static fn_class_enum_basetype pClassEnumBaseType;
+static fn_type_get_type pTypeGetType;
+static fn_class_get_properties pClassGetProperties;
+static fn_property_get_name pPropertyGetName;
+static fn_property_get_method pPropertyGetGetMethod;
+static fn_property_get_method pPropertyGetSetMethod;
+static fn_field_static_get_value pFieldStaticGetValue;
+
+static uintptr_t g_ModuleBase = 0;
+static size_t g_ModuleSize = 0;
 
 static bool HasRequiredExports(HMODULE hModule) {
     if (!hModule) return false;
@@ -131,6 +152,21 @@ bool Initialize() {
     pMethodGetParam = (fn_method_get_param)get("il2cpp_method_get_param");
     pMethodGetParamName = (fn_method_get_param_name)get("il2cpp_method_get_param_name");
     pTypeGetName = (fn_type_get_name)get("il2cpp_type_get_name");
+    pClassGetFlags = (fn_class_get_flags)get("il2cpp_class_get_flags");
+    pClassIsEnum = (fn_class_is_enum)get("il2cpp_class_is_enum");
+    pClassEnumBaseType = (fn_class_enum_basetype)get("il2cpp_class_enum_basetype");
+    pTypeGetType = (fn_type_get_type)get("il2cpp_type_get_type");
+    pClassGetProperties = (fn_class_get_properties)get("il2cpp_class_get_properties");
+    pPropertyGetName = (fn_property_get_name)get("il2cpp_property_get_name");
+    pPropertyGetGetMethod = (fn_property_get_method)get("il2cpp_property_get_get_method");
+    pPropertyGetSetMethod = (fn_property_get_method)get("il2cpp_property_get_set_method");
+    pFieldStaticGetValue = (fn_field_static_get_value)get("il2cpp_field_static_get_value");
+
+    MODULEINFO mi = {};
+    if (GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(mi))) {
+        g_ModuleBase = (uintptr_t)mi.lpBaseOfDll;
+        g_ModuleSize = mi.SizeOfImage;
+    }
 
     Initialized = pDomainGet && pDomainGetAssemblies && pAssemblyGetImage;
     return Initialized;
@@ -238,6 +274,74 @@ const char* MethodGetParamName(void* method, uint32_t index) {
 
 const char* TypeGetName(void* type) {
     return pTypeGetName ? pTypeGetName(type) : "";
+}
+
+uint32_t ClassGetFlags(void* klass) {
+    return pClassGetFlags ? pClassGetFlags(klass) : 0;
+}
+
+bool ClassIsEnum(void* klass) {
+    return pClassIsEnum ? pClassIsEnum(klass) != 0 : false;
+}
+
+void* ClassEnumBaseType(void* klass) {
+    return pClassEnumBaseType ? pClassEnumBaseType(klass) : nullptr;
+}
+
+int TypeGetTypeCode(void* type) {
+    return (pTypeGetType && type) ? pTypeGetType(type) : 0;
+}
+
+void* ClassGetProperties(void* klass, void** iter) {
+    return pClassGetProperties ? pClassGetProperties(klass, iter) : nullptr;
+}
+
+const char* PropertyGetName(void* prop) {
+    return pPropertyGetName ? pPropertyGetName(prop) : "";
+}
+
+void* PropertyGetGetMethod(void* prop) {
+    return pPropertyGetGetMethod ? pPropertyGetGetMethod(prop) : nullptr;
+}
+
+void* PropertyGetSetMethod(void* prop) {
+    return pPropertyGetSetMethod ? pPropertyGetSetMethod(prop) : nullptr;
+}
+
+// Plain-C helpers: __try cannot live in a function that needs C++ unwinding.
+static bool CallStaticGetValueGuarded(void* field, void* buf) {
+    __try {
+        pFieldStaticGetValue(field, buf);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool ReadPointerGuarded(void* addr, void** out) {
+    __try {
+        *out = *(void**)addr;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool FieldStaticGetValue(void* field, void* buf, size_t size) {
+    if (!pFieldStaticGetValue || !field || !buf) return false;
+    memset(buf, 0, size);
+    return CallStaticGetValueGuarded(field, buf);
+}
+
+bool MethodGetRva(void* method, uint64_t* rva) {
+    if (!method || !g_ModuleBase) return false;
+    // MethodInfo::methodPointer is the first member of MethodInfo.
+    void* fn = nullptr;
+    if (!ReadPointerGuarded(method, &fn) || !fn) return false;
+    uintptr_t p = (uintptr_t)fn;
+    if (p < g_ModuleBase || p >= g_ModuleBase + g_ModuleSize) return false;
+    *rva = (uint64_t)(p - g_ModuleBase);
+    return true;
 }
 
 } // namespace IL2CPP

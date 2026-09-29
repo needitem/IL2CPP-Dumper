@@ -44,6 +44,15 @@ void* FieldGetType(void* field);
 uint32_t FieldGetFlags(void* field);
 int32_t FieldGetOffset(void* field);
 
+// Optional exports (0/null when missing)
+uint32_t ClassGetFlags(void* klass);               // TypeAttributes
+bool ClassIsEnum(void* klass);
+void* ClassGetInterfaces(void* klass, void** iter);
+void* ClassGetProperties(void* klass, void** iter);
+const char* PropertyGetName(void* prop);
+void* PropertyGetGetMethod(void* prop);
+void* PropertyGetSetMethod(void* prop);
+
 // Returns heap-allocated string, must be freed with MonoFree()
 char* TypeGetName(void* type);
 void MonoFree(void* ptr);

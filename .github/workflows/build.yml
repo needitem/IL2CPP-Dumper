@@ -1,0 +1,26 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  model-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JSON serializer tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -IDump/include tests/model_test.cpp Dump/src/Model.cpp -o model_test
+          ./model_test
+
+  windows-build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        platform: [x86, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build
+        run: msbuild Dump.sln /p:Configuration=Release /p:Platform=${{ matrix.platform }}

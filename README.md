@@ -13,6 +13,8 @@ A GUI tool for extracting metadata from Unity IL2CPP games.
   - Human: Complete C# code
   - AI: Filtered JSON for LLM analysis
   - Custom: Choose your combination
+- **LLM-friendly JSON** - `index.json` + one class per line + split files, with method RVAs, enum values, properties and interfaces (see [docs/SCHEMA.md](docs/SCHEMA.md))
+- **Headless mode** - `auto=ai` in `IL2CPP_Dumper.cfg` dumps without a GUI, for scripts and AI agents
 - **Real-time Progress** - Progress bar and log display
 - **Smart Filtering** - Auto-exclude Unity/System assemblies
 
@@ -95,10 +97,12 @@ C:\IL2CPP_Dump\
 **AI Mode:**
 ```
 C:\IL2CPP_Dump_JSON\
-  └── *.json (filtered full metadata)
+  ├── index.json      (start here: assemblies -> files -> namespaces)
+  └── *.json          (filtered full metadata, one class per line, split every 1000 classes)
 
 C:\IL2CPP_Dump_Summary\
-  └── *.json (public API only)
+  ├── index.json
+  └── *.json          (compact API view)
 ```
 
 ## Output Mode Comparison
@@ -120,46 +124,54 @@ C:\IL2CPP_Dump_Summary\
 
 ## JSON Output Example
 
+Full schema: [docs/SCHEMA.md](docs/SCHEMA.md). Each class is one line in the file; shown expanded here.
+
 ### JSON Full
 
 ```json
 {
-  "assembly": "Assembly-CSharp.dll",
-  "classes": [
-    {
-      "name": "PlayerController",
-      "fullName": "Game.PlayerController",
-      "type": "class",
-      "token": "0x2000015",
-      "extends": "MonoBehaviour",
-      "fields": [
-        {"name": "health", "type": "float", "access": "public", "offset": "0x18"}
-      ],
-      "methods": [
-        {"name": "TakeDamage", "returns": "void", "params": [{"type": "float", "name": "amount"}], "access": "public"}
-      ]
-    }
+  "name": "PlayerController",
+  "fullName": "Game.PlayerController",
+  "type": "class",
+  "token": "0x2000015",
+  "extends": "UnityEngine.MonoBehaviour",
+  "implements": ["Game.IDamageable"],
+  "fields": [
+    {"name": "health", "type": "System.Single", "access": "public", "offset": "0x18"}
+  ],
+  "properties": [
+    {"name": "IsDead", "type": "System.Boolean", "access": "public", "get": true}
+  ],
+  "methods": [
+    {"name": "TakeDamage", "returns": "System.Void", "params": [{"type": "System.Single", "name": "amount"}],
+     "access": "public", "virtual": true, "rva": "0x1234abc"}
   ]
 }
 ```
 
 ### JSON Summary (for LLM)
 
-```json
-{
-  "assembly": "Assembly-CSharp.dll",
-  "classes": [
-    {
-      "name": "PlayerController",
-      "fullName": "Game.PlayerController",
-      "type": "class",
-      "extends": "MonoBehaviour",
-      "fields": [{"name": "health", "type": "float"}],
-      "methods": [{"name": "TakeDamage", "returns": "void", "params": [{"type": "float", "name": "amount"}]}]
-    }
-  ]
-}
+Same, minus token / offset / RVA, with `public` access omitted and compiler-generated methods dropped.
+
+## Headless / automation
+
+Put `IL2CPP_Dumper.cfg` next to the game executable before injecting (it is deleted after being read):
+
 ```
+out=D:\dumps\mygame\
+auto=ai
+chunk=1000
+skipPrivate=1
+```
+
+The GUI is skipped; progress goes to `IL2CPP_Dumper.log` and the result to `IL2CPP_Dump_DONE.txt`
+(`ok: ...` or `error: ...`). Keys: `out`, `auto` (`ai` | `human` | `mono`), `chunk`,
+`skipUnity`, `skipSystem`, `skipPrivate`, `skipCompilerGenerated`. A bare path on the first line is still
+accepted as the output directory.
+
+## Development
+
+See [CLAUDE.md](CLAUDE.md). The JSON layer has off-Windows unit tests (`tests/model_test.cpp`) that run in CI.
 
 ## Troubleshooting
 

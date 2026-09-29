@@ -34,6 +34,12 @@ using fn_field_get_flags     = uint32_t(*)(void*);
 using fn_field_get_offset    = int32_t(*)(void*);
 using fn_type_get_name       = char*(*)(void*);
 using fn_free                = void(*)(void*);
+using fn_class_get_flags     = uint32_t(*)(void*);
+using fn_class_is_enum       = int(*)(void*);
+using fn_class_get_interfaces= void*(*)(void*, void**);
+using fn_class_get_properties= void*(*)(void*, void**);
+using fn_property_get_name   = const char*(*)(void*);
+using fn_property_get_method = void*(*)(void*);
 
 static fn_get_root_domain      pGetRootDomain;
 static fn_domain_foreach       pDomainForeach;
@@ -61,6 +67,13 @@ static fn_field_get_flags      pFieldGetFlags;
 static fn_field_get_offset     pFieldGetOffset;
 static fn_type_get_name        pTypeGetName;
 static fn_free                 pFree;
+static fn_class_get_flags      pClassGetFlags;
+static fn_class_is_enum        pClassIsEnum;
+static fn_class_get_interfaces pClassGetInterfaces;
+static fn_class_get_properties pClassGetProperties;
+static fn_property_get_name    pPropertyGetName;
+static fn_property_get_method  pPropertyGetGetMethod;
+static fn_property_get_method  pPropertyGetSetMethod;
 
 // 로드된 모든 모듈 이름을 로그에 출력하고 mono_get_root_domain 익스포트 모듈 탐색
 static std::string g_DiagLog; // Initialize() 실패 시 진단 메시지
@@ -145,6 +158,13 @@ bool Initialize() {
     pTypeGetName        = (fn_type_get_name)        get("mono_type_get_name");
     pFree               = (fn_free)                 get("mono_free");
     if (!pFree) pFree   = (fn_free)                 get("g_free");
+    pClassGetFlags      = (fn_class_get_flags)      get("mono_class_get_flags");
+    pClassIsEnum        = (fn_class_is_enum)        get("mono_class_is_enum");
+    pClassGetInterfaces = (fn_class_get_interfaces) get("mono_class_get_interfaces");
+    pClassGetProperties = (fn_class_get_properties) get("mono_class_get_properties");
+    pPropertyGetName    = (fn_property_get_name)    get("mono_property_get_name");
+    pPropertyGetGetMethod = (fn_property_get_method) get("mono_property_get_get_method");
+    pPropertyGetSetMethod = (fn_property_get_method) get("mono_property_get_set_method");
 
     Initialized = pGetRootDomain && pDomainForeach && pAssemblyGetImage &&
                   pImageGetName  && pClassGet;
@@ -252,6 +272,34 @@ uint32_t FieldGetFlags(void* field) {
 
 int32_t FieldGetOffset(void* field) {
     return pFieldGetOffset ? pFieldGetOffset(field) : 0;
+}
+
+uint32_t ClassGetFlags(void* klass) {
+    return pClassGetFlags ? pClassGetFlags(klass) : 0;
+}
+
+bool ClassIsEnum(void* klass) {
+    return pClassIsEnum ? pClassIsEnum(klass) != 0 : false;
+}
+
+void* ClassGetInterfaces(void* klass, void** iter) {
+    return pClassGetInterfaces ? pClassGetInterfaces(klass, iter) : nullptr;
+}
+
+void* ClassGetProperties(void* klass, void** iter) {
+    return pClassGetProperties ? pClassGetProperties(klass, iter) : nullptr;
+}
+
+const char* PropertyGetName(void* prop) {
+    return pPropertyGetName ? pPropertyGetName(prop) : "";
+}
+
+void* PropertyGetGetMethod(void* prop) {
+    return pPropertyGetGetMethod ? pPropertyGetGetMethod(prop) : nullptr;
+}
+
+void* PropertyGetSetMethod(void* prop) {
+    return pPropertyGetSetMethod ? pPropertyGetSetMethod(prop) : nullptr;
 }
 
 char* TypeGetName(void* type) {
